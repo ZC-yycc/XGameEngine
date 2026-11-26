@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 
 use xgc_reflect::{Component, Value};
 use xgc_store::{save_prefab, save_project, save_world, ProjectContent, ProjectManifest};
-use xgc_world::{LodGroup, MeshRenderer, Name, Parent, PrefabInstance, Script, World};
+use xgc_world::{LodGroup, Material, MeshRenderer, Name, Parent, PrefabInstance, Script, World};
 
 #[test]
 fn pack_uses_schema_to_find_model_references() {
@@ -64,6 +64,141 @@ fn pack_uses_schema_to_find_model_references() {
         xgc_store::load_world_binary(&out.join("world.xgcb")).unwrap(),
         data
     );
+}
+
+#[test]
+fn pack_follows_native_prefabs_and_keeps_material_assets() {
+    let root = Temp::new("pack-prefabs");
+    let assets = root.0.join("source");
+    fs::create_dir_all(assets.join("Prefabs/Nested")).unwrap();
+    fs::create_dir_all(assets.join("Resources/Models/bytes")).unwrap();
+    fs::create_dir_all(assets.join("Resources/Textures")).unwrap();
+    let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../projects/XGame/Resources");
+    let model = fs::read_to_string(original.join("Fox.gltf"))
+        .unwrap()
+        .replace("Fox.bin", "bytes/geometry.bin")
+        .replace("Texture.png", "../Textures/coat.png");
+    fs::write(assets.join("Resources/Models/Fox.gltf"), model).unwrap();
+    fs::copy(
+        original.join("Fox.bin"),
+        assets.join("Resources/Models/bytes/geometry.bin"),
+    )
+    .unwrap();
+    fs::copy(
+        original.join("Texture.png"),
+        assets.join("Resources/Textures/coat.png"),
+    )
+    .unwrap();
+    fs::write(assets.join("Resources/unused.glb"), "unused").unwrap();
+    fs::write(assets.join("Resources/shared.mat"), "(roughness: 0.3)").unwrap();
+    fs::write(
+        assets.join("Resources/shared.mat.meta"),
+        "(guid: \"feedface\")",
+    )
+    .unwrap();
+    fs::write(
+        assets.join("Prefabs/first.prefab.json.meta"),
+        "(guid: \"aabbccdd\")",
+    )
+    .unwrap();
+
+    let mut first = World::new();
+    first.spawn((PrefabInstance {
+        source: "Prefabs/Nested/second.prefab.json".into(),
+        source_id: 1,
+        root: true,
+    },));
+    save_prefab(
+        &assets.join("Prefabs/first.prefab.json"),
+        &first.world_data(),
+    )
+    .unwrap();
+    let mut second = World::new();
+    second.reserve_entity_ids(1);
+    second.spawn((
+        PrefabInstance {
+            source: "guid://aabbccdd".into(),
+            source_id: 0,
+            root: true,
+        },
+        Material {
+            asset: "guid://feedface".into(),
+            ..Material::default()
+        },
+        MeshRenderer {
+            model: "Resources/Models/Fox.gltf".into(),
+        },
+    ));
+    save_prefab(
+        &assets.join("Prefabs/Nested/second.prefab.json"),
+        &second.world_data(),
+    )
+    .unwrap();
+    save_prefab(
+        &assets.join("Prefabs/unused.prefab.json"),
+        &World::new().world_data(),
+    )
+    .unwrap();
+
+    let mut scene = World::new();
+    scene.reserve_entity_ids(2);
+    scene.spawn((PrefabInstance {
+        source: "guid://aabbccdd".into(),
+        source_id: 0,
+        root: true,
+    },));
+    let world = root.0.join("scene.json");
+    save_world(&world, &scene.world_data()).unwrap();
+    let out = assets.join("A-cooked");
+    let pack = || {
+        xgc()
+            .arg("pack")
+            .args([&world, &assets, &out])
+            .output()
+            .unwrap()
+    };
+    let output = pack();
+    assert!(output.status.success(), "{output:?}");
+    for path in [
+        "Prefabs/first.prefab.json",
+        "Prefabs/first.prefab.json.meta",
+        "Prefabs/Nested/second.prefab.json",
+        "Resources/shared.mat",
+        "Resources/shared.mat.meta",
+        "Resources/Models/Fox.gltf",
+        "Resources/Models/bytes/geometry.bin",
+        "Resources/Textures/coat.png",
+    ] {
+        assert_eq!(
+            fs::read(out.join(path)).unwrap_or_else(|err| panic!("缺少 {path}：{err}")),
+            fs::read(assets.join(path)).unwrap(),
+        );
+    }
+    for unused in ["Prefabs/unused.prefab.json", "Resources/unused.glb"] {
+        assert!(!out.join(unused).exists(), "不应烹饪 {unused}");
+    }
+    xgc_asset::verify_manifest(&out).unwrap();
+    assert_eq!(
+        xgc_store::load_world_binary(&out.join("world.xgcb")).unwrap(),
+        scene.world_data()
+    );
+    let mut meshes = xgc_render::MeshCache::with_catalog(&out, xgc_asset::scan(&out).unwrap());
+    let mesh = meshes.get("Resources/Models/Fox.gltf").unwrap().unwrap();
+    assert!(mesh.texture.is_some());
+    assert!(!mesh.positions.is_empty());
+    assert_eq!(
+        meshes
+            .material("guid://feedface")
+            .unwrap()
+            .unwrap()
+            .roughness,
+        0.3
+    );
+
+    let first_pack = snapshot(&out);
+    let output = pack();
+    assert!(output.status.success(), "{output:?}");
+    assert!(snapshot(&out) == first_pack, "重复打包改变了输出文件");
 }
 
 #[test]

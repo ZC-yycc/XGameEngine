@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
-use xgc_asset::scan;
 use xgc_base::path::normalize_project_relative;
 use xgc_host::ScriptedRunner;
 use xgc_store::{load_world, save_world, save_world_binary};
@@ -46,15 +45,24 @@ pub fn pack(world_path: Option<&str>, root: Option<&str>, out: Option<&str>) -> 
             return ExitCode::from(2);
         }
     };
-    let keep = referenced_paths(Path::new(root), &data);
-    let mut manifest =
-        match xgc_asset::cook_project_filtered(Path::new(root), Path::new(out), keep.as_ref()) {
-            Ok(manifest) => manifest,
-            Err(err) => {
-                eprintln!("烹饪失败：{err}");
-                return ExitCode::from(1);
-            }
-        };
+    let registry = builtin_registry();
+    let mut manifest = match xgc_asset::cook_project_with_dependencies(
+        Path::new(root),
+        Path::new(out),
+        |root, catalog| referenced_paths(root, &data, catalog, &registry),
+        |root, catalog, path| {
+            let Ok(prefab) = xgc_store::load_prefab(path) else {
+                return BTreeSet::new();
+            };
+            referenced_paths(root, &prefab, catalog, &registry)
+        },
+    ) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            eprintln!("烹饪失败：{err}");
+            return ExitCode::from(1);
+        }
+    };
     if let Err(err) = save_world(&Path::new(out).join("world.json"), &data) {
         eprintln!("写入 cooked world 失败：{err}");
         return ExitCode::from(1);
@@ -138,9 +146,12 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn referenced_paths(root: &Path, data: &WorldData) -> Option<BTreeSet<String>> {
-    let catalog = scan(root).ok()?;
-    let registry = builtin_registry();
+fn referenced_paths(
+    root: &Path,
+    data: &WorldData,
+    catalog: &xgc_asset::AssetCatalog,
+    registry: &xgc_reflect::Registry,
+) -> BTreeSet<String> {
     let mut keep = BTreeSet::new();
     for component in data.entities.iter().flat_map(|entity| &entity.components) {
         if let Some(schema) = registry.get(component.component) {
@@ -149,8 +160,9 @@ fn referenced_paths(root: &Path, data: &WorldData) -> Option<BTreeSet<String>> {
                     if let Some(relative) = catalog
                         .resolve(reference)
                         .and_then(|path| path.strip_prefix(root).ok())
+                        .and_then(Path::to_str)
                     {
-                        keep.insert(relative.to_string_lossy().replace('\\', "/"));
+                        keep.insert(relative.replace(std::path::MAIN_SEPARATOR, "/"));
                     }
                 } else if let Ok(relative) = normalize_project_relative(reference) {
                     keep.insert(relative);
@@ -158,5 +170,5 @@ fn referenced_paths(root: &Path, data: &WorldData) -> Option<BTreeSet<String>> {
             });
         }
     }
-    Some(keep)
+    keep
 }

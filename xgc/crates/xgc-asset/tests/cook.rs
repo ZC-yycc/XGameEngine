@@ -72,7 +72,7 @@ fn cooks_referenced_sources_and_stale_files() {
 
 #[test]
 fn cooks_only_referenced_assets_and_sidecars() {
-    let root = std::env::temp_dir().join(format!(
+    let fixture = std::env::temp_dir().join(format!(
         "xgc_prune_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -80,14 +80,35 @@ fn cooks_only_referenced_assets_and_sidecars() {
             .unwrap()
             .as_nanos()
     ));
-    let out = root.join("cooked");
-    std::fs::create_dir_all(root.join("models")).unwrap();
+    let root = fixture.join("source");
+    let out = fixture.join("cooked");
+    std::fs::create_dir_all(root.join("models/data")).unwrap();
+    std::fs::create_dir_all(root.join("textures")).unwrap();
+    std::fs::write(fixture.join("outside.png"), b"outside").unwrap();
     std::fs::write(root.join("a.lua"), b"a").unwrap();
     std::fs::write(root.join("a.lua.meta"), b"meta").unwrap();
     std::fs::write(root.join("b.lua"), b"b").unwrap();
-    std::fs::write(root.join("models/a.gltf"), b"gltf").unwrap();
-    std::fs::write(root.join("models/a.bin"), b"bin").unwrap();
+    std::fs::write(
+        root.join("models/a.gltf"),
+        br#"{
+            "asset": {"version": "2.0"},
+            "buffers": [{"byteLength": 3, "uri": "data/vertices.bin"}],
+            "images": [
+                {"uri": "file://../textures/albedo.png"},
+                {"uri": "../textures/albedo.png"},
+                {"uri": "../../outside.png"},
+                {"uri": "../../source/textures/unused.png"},
+                {"uri": "data:image/png;base64,AAAA"}
+            ]
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("models/data/vertices.bin"), b"bin").unwrap();
+    std::fs::write(root.join("models/a.bin"), b"unused").unwrap();
     std::fs::write(root.join("models/b.glb"), b"glb").unwrap();
+    std::fs::write(root.join("textures/albedo.png"), b"png").unwrap();
+    std::fs::write(root.join("textures/albedo.png.meta"), b"meta").unwrap();
+    std::fs::write(root.join("textures/unused.png"), b"unused").unwrap();
     std::fs::write(root.join("input.ron"), b"InputMap()").unwrap();
     let keep = ["a.lua".to_string(), "models/a.gltf".to_string()]
         .into_iter()
@@ -104,11 +125,19 @@ fn cooks_only_referenced_assets_and_sidecars() {
             "a.lua",
             "a.lua.meta",
             "input.ron",
-            "models/a.bin",
-            "models/a.gltf"
+            "models/a.gltf",
+            "models/data/vertices.bin",
+            "textures/albedo.png",
+            "textures/albedo.png.meta"
         ]
     );
-    assert!(!out.join("b.lua").exists());
-    assert!(!out.join("models/b.glb").exists());
-    std::fs::remove_dir_all(&root).unwrap();
+    for unused in [
+        "b.lua",
+        "models/a.bin",
+        "models/b.glb",
+        "textures/unused.png",
+    ] {
+        assert!(!out.join(unused).exists(), "不应烹饪 {unused}");
+    }
+    std::fs::remove_dir_all(fixture).unwrap();
 }

@@ -7,8 +7,8 @@
 
 mod cook;
 pub use cook::{
-    cook_project, cook_project_filtered, file_entry, verify_manifest, write_manifest, CookManifest,
-    CookedFile,
+    cook_project, cook_project_filtered, cook_project_with_dependencies, file_entry,
+    verify_manifest, write_manifest, CookManifest, CookedFile,
 };
 
 use std::collections::BTreeMap;
@@ -71,15 +71,20 @@ impl AssetCatalog {
 }
 
 pub fn scan(root: &Path) -> Result<AssetCatalog, AssetError> {
-    let mut catalog = AssetCatalog::default();
-    let metas = find_files(root, |path| {
-        path.extension()
-            .is_some_and(|extension| extension == "meta")
-    })
-    .map_err(|err| AssetError::Io(format!("{}：{err}", root.display())))?;
+    let metas = find_files(root, is_meta)
+        .map_err(|err| AssetError::Io(format!("{}：{err}", root.display())))?;
+    Ok(catalog_from_metas(metas.iter().map(PathBuf::as_path)))
+}
 
+fn is_meta(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "meta")
+}
+
+fn catalog_from_metas<'a>(metas: impl IntoIterator<Item = &'a Path>) -> AssetCatalog {
+    let mut catalog = AssetCatalog::default();
     for meta_path in metas {
-        let text = match std::fs::read_to_string(&meta_path) {
+        let text = match std::fs::read_to_string(meta_path) {
             Ok(text) => text,
             Err(err) => {
                 catalog
@@ -109,7 +114,7 @@ pub fn scan(root: &Path) -> Result<AssetCatalog, AssetError> {
         }
         catalog.by_guid.insert(meta.guid, asset_path);
     }
-    Ok(catalog)
+    catalog
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,30 +122,36 @@ struct MetaFile {
     guid: String,
 }
 
-/// 按路径排序枚举普通资产文件。目录链接可能越出项目或形成环，扫描不跟随。
+/// 按路径排序枚举普通资产文件。链接可能越出项目或形成环，扫描不跟随。
 pub fn find_files(dir: &Path, matches: impl Fn(&Path) -> bool) -> std::io::Result<Vec<PathBuf>> {
+    find_files_in(dir, |_| true, matches)
+}
+
+fn find_files_in(
+    dir: &Path,
+    descend: impl Fn(&Path) -> bool,
+    matches: impl Fn(&Path) -> bool,
+) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut directories = vec![dir.to_path_buf()];
     while let Some(directory) = directories.pop() {
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
             let kind = entry.file_type()?;
-            if kind.is_dir() {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    // 目录 junction 同样可能指向祖先目录。
-                    const REPARSE_POINT: u32 = 0x400;
-                    if entry.metadata()?.file_attributes() & REPARSE_POINT != 0 {
-                        continue;
-                    }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                // junction 可以绕过 is_symlink，目录和文件都检查属性。
+                const REPARSE_POINT: u32 = 0x400;
+                if entry.metadata()?.file_attributes() & REPARSE_POINT != 0 {
+                    continue;
                 }
-                directories.push(entry.path());
-            } else if kind.is_file() {
-                let path = entry.path();
-                if matches(&path) {
-                    files.push(path);
-                }
+            }
+            let path = entry.path();
+            if kind.is_dir() && descend(&path) {
+                directories.push(path);
+            } else if kind.is_file() && matches(&path) {
+                files.push(path);
             }
         }
     }

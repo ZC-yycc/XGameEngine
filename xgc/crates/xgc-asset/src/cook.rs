@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{catalog_from_metas, find_files_in, is_meta, AssetCatalog};
+
 const COOK_VERSION: u32 = 1;
 const MANIFEST: &str = "cook.json";
 const EXTENSIONS: &[&str] = &[
-    "glb", "gltf", "bin", "wav", "lua", "png", "ppm", "ron", "meta", "ttf",
+    "glb", "gltf", "bin", "wav", "lua", "png", "ppm", "ron", "meta", "ttf", "mat",
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,16 +34,60 @@ pub fn cook_project(root: &Path, out: &Path) -> Result<CookManifest, String> {
     cook_project_filtered(root, out, None)
 }
 
-/// `keep = None` 复制全部支持的源；`Some` 时只复制引用资产及其 `.meta` / `.bin`。
+/// `keep = None` 复制全部支持的源；`Some` 时从指定项目相对路径展开依赖。
 pub fn cook_project_filtered(
     root: &Path,
     out: &Path,
     keep: Option<&BTreeSet<String>>,
 ) -> Result<CookManifest, String> {
+    cook(root, out, |_, sources| {
+        dependency_closure(sources, keep, |_| BTreeSet::new())
+    })
+}
+
+/// 两个回调返回世界 / 预制体的项目相对引用，源目录与 GUID 目录共用同一文件表。
+pub fn cook_project_with_dependencies(
+    root: &Path,
+    out: &Path,
+    world_dependencies: impl FnOnce(&Path, &AssetCatalog) -> BTreeSet<String>,
+    mut prefab_dependencies: impl FnMut(&Path, &AssetCatalog, &Path) -> BTreeSet<String>,
+) -> Result<CookManifest, String> {
+    cook(root, out, |source_root, sources| {
+        let mut metas: Vec<_> = sources
+            .values()
+            .map(PathBuf::as_path)
+            .filter(|path| is_meta(path))
+            .collect();
+        // 重复 GUID 沿用资产目录的路径首占规则。
+        metas.sort_unstable();
+        let catalog = catalog_from_metas(metas);
+        let keep = world_dependencies(source_root, &catalog);
+        dependency_closure(sources, Some(&keep), |path| {
+            prefab_dependencies(source_root, &catalog, path)
+        })
+    })
+}
+
+fn cook(
+    root: &Path,
+    out: &Path,
+    select: impl FnOnce(&Path, &BTreeMap<String, PathBuf>) -> BTreeSet<String>,
+) -> Result<CookManifest, String> {
     if !root.is_dir() {
         return Err(format!("项目根不是目录：{}", root.display()));
     }
     fs::create_dir_all(out).map_err(|err| format!("创建输出目录失败：{err}"))?;
+    let source_root = root
+        .canonicalize()
+        .map_err(|err| format!("定位项目根失败：{err}"))?;
+    let output_root = out
+        .canonicalize()
+        .map_err(|err| format!("定位输出目录失败：{err}"))?;
+    if source_root == output_root {
+        return Err("输出目录不能是项目根目录".into());
+    }
+    let sources = collect_sources(&source_root, &output_root)?;
+    let files = select(&source_root, &sources);
     let previous = read_manifest(out)
         .map(|manifest| {
             manifest
@@ -51,32 +97,12 @@ pub fn cook_project_filtered(
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
-    let mut files = Vec::new();
-    collect(root, root, out, &mut files)?;
-    if let Some(keep) = keep {
-        let mut expanded = keep.clone();
-        for path in keep {
-            if path.ends_with(".gltf") {
-                expanded.insert(path.trim_end_matches(".gltf").to_string() + ".bin");
-            }
-        }
-        let metas: Vec<String> = expanded.iter().map(|path| format!("{path}.meta")).collect();
-        expanded.extend(metas);
-        files.retain(|(_, relative)| {
-            relative == "input.ron"
-                || expanded.contains(relative)
-                || (relative.ends_with(".meta")
-                    && expanded.contains(relative.trim_end_matches(".meta")))
-        });
-        let _ = &expanded;
-    }
-    files.sort_by(|a, b| a.1.cmp(&b.1));
     let mut manifest = CookManifest {
         version: COOK_VERSION,
         files: Vec::with_capacity(files.len()),
         signature: String::new(),
     };
-    for (source, relative) in files {
+    for (relative, source) in sources.into_iter().filter(|(path, _)| files.contains(path)) {
         let destination = out.join(&relative);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|err| format!("创建目录失败：{err}"))?;
@@ -96,7 +122,7 @@ pub fn cook_project_filtered(
         });
     }
     for stale in previous.keys() {
-        if !manifest.files.iter().any(|file| file.path == *stale) {
+        if !files.contains(stale) {
             let _ = fs::remove_file(out.join(stale));
         }
     }
@@ -104,43 +130,128 @@ pub fn cook_project_filtered(
     Ok(manifest)
 }
 
-fn collect(
-    root: &Path,
-    dir: &Path,
-    out: &Path,
-    files: &mut Vec<(PathBuf, String)>,
-) -> Result<(), String> {
-    let entries = fs::read_dir(dir).map_err(|err| format!("读取 {} 失败：{err}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let path = entry.path();
-        if path == out {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if path.is_dir() {
-            if matches!(name.as_str(), ".git" | "target" | ".autosave" | "dist") {
-                continue;
+fn collect_sources(root: &Path, out: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
+    let paths = find_files_in(
+        root,
+        |directory| {
+            directory != out
+                && !matches!(
+                    directory.file_name().and_then(|name| name.to_str()),
+                    Some(".git" | "target" | ".autosave" | "dist")
+                )
+        },
+        |_| true,
+    )
+    .map_err(|err| format!("读取 {} 失败：{err}", root.display()))?;
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            let relative = path.strip_prefix(root).ok()?.to_str()?;
+            let key = relative.replace(std::path::MAIN_SEPARATOR, "/");
+            // 打包生成的顶层文件不能被外链重新解释为源资产。
+            if matches!(key.as_str(), MANIFEST | "world.json" | "world.xgcb") {
+                return None;
             }
-            collect(root, &path, out, files)?;
-            continue;
-        }
-        let extension = path
+            Some((key, path))
+        })
+        .collect())
+}
+
+fn is_source_asset(path: &str) -> bool {
+    path.ends_with(".prefab.json")
+        || Path::new(path)
             .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if !EXTENSIONS.contains(&extension.as_str()) && name != "input.ron" {
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+}
+
+fn dependency_closure(
+    sources: &BTreeMap<String, PathBuf>,
+    keep: Option<&BTreeSet<String>>,
+    mut prefab_dependencies: impl FnMut(&Path) -> BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut pending: Vec<String> = sources
+        .keys()
+        .filter(|path| {
+            path.as_str() == "input.ron"
+                || (is_source_asset(path) && keep.is_none_or(|keep| keep.contains(*path)))
+        })
+        .cloned()
+        .collect();
+    let mut files = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        let Some(source) = sources.get(&path) else {
+            // 源工程已有的悬空引用由 check 处理。
+            continue;
+        };
+        if !files.insert(path.clone()) {
             continue;
         }
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|err| err.to_string())?
-            .to_string_lossy()
-            .replace('\\', "/");
-        files.push((path, relative));
+        let meta = format!("{path}.meta");
+        if sources.contains_key(&meta) {
+            files.insert(meta);
+        }
+        if path.ends_with(".prefab.json") {
+            pending.extend(
+                prefab_dependencies(source)
+                    .into_iter()
+                    .filter(|path| is_source_asset(path)),
+            );
+        } else if source
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("gltf"))
+        {
+            if let Ok(text) = fs::read_to_string(source) {
+                pending.extend(gltf_dependencies(&path, &text));
+            }
+        }
     }
-    Ok(())
+    files
+}
+
+#[derive(Deserialize)]
+struct GltfDependencies {
+    #[serde(default)]
+    buffers: Vec<GltfResource>,
+    #[serde(default)]
+    images: Vec<GltfResource>,
+}
+
+#[derive(Deserialize)]
+struct GltfResource {
+    uri: Option<String>,
+}
+
+fn gltf_dependencies(model: &str, text: &str) -> Vec<String> {
+    let Ok(document) = serde_json::from_str::<GltfDependencies>(text) else {
+        return Vec::new();
+    };
+    document
+        .buffers
+        .into_iter()
+        .chain(document.images)
+        .filter_map(|resource| external_path(model, resource.uri.as_deref()?))
+        .collect()
+}
+
+fn external_path(model: &str, uri: &str) -> Option<String> {
+    let uri = uri.strip_prefix("file://").unwrap_or(uri);
+    if uri.starts_with(['/', '\\']) || uri.contains(':') {
+        return None;
+    }
+    let mut parts: Vec<_> = model.split('/').collect();
+    parts.pop();
+    // 外链相对模型目录；允许同项目的兄弟目录，不能越过项目根。
+    for part in uri.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 fn read_manifest(out: &Path) -> Option<CookManifest> {
