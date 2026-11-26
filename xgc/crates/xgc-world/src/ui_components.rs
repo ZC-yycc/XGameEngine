@@ -2,6 +2,8 @@
 
 use xgc_reflect::{AssetKind, Component, ComponentId, FieldDescriptor, FieldType, Value};
 
+use crate::{EntityKey, World};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiElement {
     pub kind: String,
@@ -408,6 +410,34 @@ impl Default for UiInput {
             nav: "none",
             confirm: false,
         }
+    }
+}
+
+impl World {
+    /// 设备输入优先于场景里的输入组件。写入设备输入不会改动实体表。
+    pub fn set_host_ui_input(&mut self, input: UiInput) {
+        self.host_ui_input = Some(input);
+    }
+
+    pub fn ui_input(&self) -> Option<UiInput> {
+        self.host_ui_input
+            .or_else(|| self.ui_input_key().and_then(|key| self.get(key).copied()))
+    }
+
+    /// UI 阶段只结算当前输入源的边沿，播放时不改动场景里的输入组件。
+    pub fn ui_input_mut(&mut self) -> Option<&mut UiInput> {
+        if self.host_ui_input.is_some() {
+            self.host_ui_input.as_mut()
+        } else {
+            let key = self.ui_input_key()?;
+            self.get_mut(key)
+        }
+    }
+
+    fn ui_input_key(&self) -> Option<EntityKey> {
+        self.entity_ids(Some(UiInput::ID))
+            .next()
+            .and_then(|id| self.key(id))
     }
 }
 

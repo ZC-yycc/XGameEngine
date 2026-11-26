@@ -147,6 +147,7 @@ impl World {
 
     /// 恢复整个世界的逻辑状态；保留 archetype 容器，清空实体后按快照重建。
     pub fn restore_snapshot(&mut self, snapshot: &WorldSnapshot) {
+        self.host_ui_input = None;
         let keys: Vec<_> = self.by_id.values().copied().collect();
         for key in keys {
             let _ = self.despawn_raw(key);

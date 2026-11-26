@@ -114,30 +114,13 @@ impl Simulation {
         &mut self.world
     }
 
-    /// 宿主每帧写入 UI 输入；没有 `ui.input` 实体时自动补一个。
+    /// 宿主在固定步前写入设备输入。无头回放仍可读取场景里的 `ui.input`。
     pub fn set_ui_input(&mut self, input: UiInput) {
-        let mut key = None;
-        self.world.for_each::<UiInput>(|existing, _| {
-            if key.is_none() {
-                key = Some(existing);
-            }
-        });
-        match key.and_then(|key| self.world.get_mut::<UiInput>(key)) {
-            Some(slot) => *slot = input,
-            None => {
-                self.world.spawn((input,));
-            }
-        }
+        self.world.set_host_ui_input(input);
     }
 
     pub fn ui_input(&self) -> Option<UiInput> {
-        let mut found = None;
-        self.world.for_each::<UiInput>(|_, input| {
-            if found.is_none() {
-                found = Some(*input);
-            }
-        });
-        found
+        self.world.ui_input()
     }
 
     pub fn trace(&self) -> &Trace {

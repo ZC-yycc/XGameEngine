@@ -131,11 +131,11 @@ impl System for UiInteractionSystem {
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
-        let input = input_snapshot(world);
-        let cursor = input.and_then(|(_, input)| {
+        let input = world.ui_input();
+        let cursor = input.and_then(|input| {
             (input.cursor[0] >= 0.0 && input.cursor[1] >= 0.0).then_some(input.cursor)
         });
-        let click = input.is_some_and(|(_, input)| input.click);
+        let click = input.is_some_and(|input| input.click);
         let mut interactable = HashMap::new();
         world.for_each::<UiElement>(|key, element| {
             interactable.insert(key, element.interactable);
@@ -152,16 +152,6 @@ impl System for UiInteractionSystem {
             state.clicked = hovered && click;
         });
     }
-}
-
-fn input_snapshot(world: &World) -> Option<(xgc_base::EntityKey, UiInput)> {
-    let mut found = None;
-    world.for_each::<UiInput>(|key, input| {
-        if found.is_none() {
-            found = Some((key, *input));
-        }
-    });
-    found
 }
 
 fn nav_from(value: &str) -> Option<UiNav> {
@@ -201,7 +191,7 @@ impl System for UiFocusSystem {
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
-        let Some((input_key, input)) = input_snapshot(world) else {
+        let Some(input) = world.ui_input() else {
             return;
         };
         let nav = nav_from(input.nav);
@@ -265,7 +255,7 @@ impl System for UiFocusSystem {
                 state.pressed = true;
             }
         }
-        if let Some(input) = world.get_mut::<UiInput>(input_key) {
+        if let Some(input) = world.ui_input_mut() {
             input.nav = "none";
             input.confirm = false;
         }

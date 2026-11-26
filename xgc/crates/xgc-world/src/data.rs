@@ -154,6 +154,7 @@ impl World {
 
     /// 从可序列化世界数据重建；实体 ID / revision / 组件全部保留。
     pub fn restore_world_data(&mut self, data: &WorldData) -> Result<(), String> {
+        self.host_ui_input = None;
         let keys: Vec<_> = self.by_id.values().copied().collect();
         for key in keys {
             let _ = self.despawn_raw(key);
