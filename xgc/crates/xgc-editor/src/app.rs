@@ -1,6 +1,7 @@
 //! 最小 eframe 编辑器：顶部工具栏、左侧层级、中央 Inspector。
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 mod assets_panel;
 mod inspector;
@@ -60,7 +61,7 @@ pub struct EditorApp {
     scale_step: f32,
     prefab_path: String,
     prefab_position: [f32; 3],
-    script_root: String,
+    last_play_update: Option<Instant>,
     assets: Option<Vec<AssetEntry>>,
     selected_asset: Option<String>,
 }
@@ -82,14 +83,14 @@ impl EditorApp {
             scale_step: 0.1,
             prefab_path: String::new(),
             prefab_position: [0.0; 3],
-            script_root: String::new(),
+            last_play_update: None,
             assets: None,
             selected_asset: None,
         }
     }
 
     fn viewport_meshes(&self) -> MeshCache {
-        let Some(root) = self.state.project_root() else {
+        let Some(root) = self.state.asset_root() else {
             return MeshCache::new(".");
         };
         match xgc_asset::scan(root) {
@@ -329,11 +330,29 @@ impl EditorApp {
             }
         });
     }
+    fn tick_play(&mut self, ctx: &egui::Context, now: Instant) {
+        let elapsed = self
+            .last_play_update
+            .replace(now)
+            .map_or(Duration::ZERO, |previous| {
+                now.saturating_duration_since(previous)
+            });
+        match self.state.advance_play(elapsed) {
+            Ok(Some(wait)) => ctx.request_repaint_after(wait.saturating_sub(now.elapsed())),
+            Ok(None) => self.last_play_update = None,
+            Err(err) => {
+                self.last_play_update = None;
+                self.status = Some(err);
+            }
+        }
+    }
 }
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.state.apply_input(&input_state(ctx));
+        if self.state.is_playing() {
+            self.state.apply_input(&input_state(ctx));
+        }
         let (undo, redo) = ctx.input(|input| {
             let command = input.modifiers.command;
             (
@@ -343,25 +362,26 @@ impl eframe::App for EditorApp {
                         || (input.modifiers.shift && input.key_pressed(egui::Key::Z))),
             )
         });
-        if undo {
+        if undo && !self.state.is_playing() {
             self.status = Some(match self.state.undo() {
                 Ok(true) => "已撤销".to_string(),
                 Ok(false) => "没有可撤销操作".to_string(),
                 Err(err) => err,
             });
         }
-        if redo {
+        if redo && !self.state.is_playing() {
             self.status = Some(match self.state.redo() {
                 Ok(true) => "已重做".to_string(),
                 Ok(false) => "没有可重做操作".to_string(),
                 Err(err) => err,
             });
         }
+        egui::TopBottomPanel::top("xgc-toolbar").show(ctx, |ui| self.toolbar(ui));
+        self.tick_play(ctx, Instant::now());
         if let Some(render_state) = frame.wgpu_render_state() {
             self.ensure_viewport(render_state);
             self.render_viewport();
         }
-        egui::TopBottomPanel::top("xgc-toolbar").show(ctx, |ui| self.toolbar(ui));
         egui::TopBottomPanel::bottom("xgc-status").show(ctx, |ui| {
             let mut text = self.status.clone().unwrap_or_else(|| {
                 self.state
@@ -398,6 +418,10 @@ impl eframe::App for EditorApp {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+            if self.state.is_playing() {
+                self.gizmo = None;
+                return;
+            }
             self.paint_gizmo(ui, &painter, image_rect, &response);
             if response.hovered() {
                 let scroll = ui.input(|input| input.raw_scroll_delta.y);

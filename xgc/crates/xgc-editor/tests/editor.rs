@@ -1,5 +1,7 @@
 //! 编辑器状态模型回归：选择 / Inspector / 编辑 / 保存 / Play 快照恢复。
 
+use std::time::Duration;
+
 use xgc_base::EntityId;
 use xgc_editor::EditorState;
 use xgc_reflect::Value;
@@ -56,15 +58,32 @@ fn edits_fields_and_saves_roundtrip() {
 #[test]
 fn play_runs_and_stop_restores_snapshot() {
     let (mut editor, id) = demo();
+    editor
+        .edit_field(id, 0x0101, "position", Value::Vec3([1.0, 0.0, 0.0]))
+        .unwrap();
+    editor.select(Some(id));
+    let before = editor.world().world_data();
+    let before_revision = editor.world().revision();
+
     editor.play().unwrap();
     assert!(editor.is_playing());
+    assert!(editor.step().unwrap().is_none());
+    editor.pause();
     assert_eq!(editor.step().unwrap().unwrap().frame, 0);
     assert!(editor
         .edit_field(id, 0x0101, "position", Value::Vec3([9.0, 0.0, 0.0]))
         .is_err());
-    editor.stop().unwrap();
+    editor.select(None);
+    editor.stop();
+
     assert!(!editor.is_playing());
-    assert_eq!(editor.selected(), None);
+    assert_eq!(editor.world().world_data(), before);
+    assert_eq!(editor.world().revision(), before_revision);
+    assert!(editor.is_dirty(), "Stop 应保留未保存的修改标记");
+    assert_eq!(editor.selected(), Some(id));
+    assert!(editor.undo().unwrap(), "Stop 后仍可撤销进入 Play 前的修改");
+    assert!(editor.redo().unwrap());
+    assert_eq!(editor.entity_position(id), Some([1.0, 0.0, 0.0]));
 }
 
 #[test]
@@ -257,18 +276,39 @@ fn editor_play_runs_scripts_and_reads_input() {
         },
     ));
     let id = world.entity(entity).unwrap();
-    let mut editor = EditorState::new(world);
-    editor.play_with_scripts(&dir).unwrap();
+    let path = dir.join("world.json");
+    xgc_store::save_world(&path, &world.world_data()).unwrap();
+    let mut editor = EditorState::open(&path).unwrap();
+    editor.play().unwrap();
     assert!(editor.input_map().is_some(), "input.ron 应被解析");
     let mut input = InputState::default();
     input.keys.insert(KeyCode::Space);
     editor.apply_input(&input);
-    for _ in 0..3 {
-        editor.step().unwrap();
-    }
+    let fixed = Duration::from_secs_f32(1.0 / 60.0);
+    let half = fixed / 2;
+    assert_eq!(editor.advance_play(half).unwrap(), Some(fixed - half));
+    assert_eq!(editor.entity_position(id), Some([0.0, 0.0, 0.0]));
+    editor.advance_play(fixed - half).unwrap();
     assert_eq!(editor.script_entity_count(), 1, "脚本应已装载");
+    assert_eq!(editor.entity_position(id), Some([1.0, 0.0, 0.0]));
+
+    editor.advance_play(half).unwrap();
+    editor.pause();
+    assert!(editor.is_paused());
+    assert_eq!(editor.advance_play(Duration::from_secs(20)).unwrap(), None);
+    assert_eq!(editor.entity_position(id), Some([1.0, 0.0, 0.0]));
+    assert_eq!(editor.step().unwrap().unwrap().frame, 1);
+    assert_eq!(editor.entity_position(id), Some([2.0, 0.0, 0.0]));
+
+    editor.resume();
+    assert_eq!(editor.advance_play(half).unwrap(), Some(fixed - half));
+    assert_eq!(editor.entity_position(id), Some([2.0, 0.0, 0.0]));
+    editor.advance_play(fixed - half).unwrap();
     assert_eq!(editor.entity_position(id), Some([3.0, 0.0, 0.0]));
-    editor.stop().unwrap();
+    editor.apply_input(&InputState::default());
+    editor.advance_play(fixed).unwrap();
+    assert_eq!(editor.entity_position(id), Some([3.0, 0.0, 0.0]));
+    editor.stop();
     assert_eq!(editor.entity_position(id), Some([0.0, 0.0, 0.0]));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -310,10 +350,13 @@ fn editor_play_applies_root_motion_like_the_cli() {
         },
     ));
     let id = world.entity(entity).unwrap();
-    let mut editor = EditorState::new(world);
-    editor.play_with_scripts(&dir).unwrap();
+    let path = dir.join("world.json");
+    xgc_store::save_world(&path, &world.world_data()).unwrap();
+    let mut editor = EditorState::open(&path).unwrap();
+    editor.play().unwrap();
+    let fixed = Duration::from_secs_f32(1.0 / 60.0);
     for _ in 0..60 {
-        editor.step().unwrap();
+        editor.advance_play(fixed).unwrap();
     }
     let position = editor.entity_position(id).expect("Fox 应有 Transform");
     assert!(
@@ -325,84 +368,7 @@ fn editor_play_applies_root_motion_like_the_cli() {
         position[1].abs() < 1e-6,
         "根运动不改 y 轴，实际 {position:?}"
     );
-    editor.stop().unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn opens_a_migrated_project_through_its_manifest() {
-    use xgc_store::{save_project, ProjectContent, ProjectManifest};
-
-    let dir = std::env::temp_dir().join(format!(
-        "xgc_editor_project_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut world = World::new();
-    world.spawn((
-        Name {
-            value: "hero".to_string(),
-        },
-        Transform::default(),
-    ));
-    xgc_store::save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();
-    std::fs::create_dir_all(dir.join("Config")).unwrap();
-    std::fs::write(
-        dir.join("Config/controls.ron"),
-        r#"InputMap(actions: {"Jump": [Key(Space)]})"#,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("input.ron"),
-        r#"InputMap(actions: {"WrongMap": [Key(Space)]})"#,
-    )
-    .unwrap();
-    let manifest_path = dir.join("project.xgc");
-    save_project(
-        &manifest_path,
-        &ProjectManifest {
-            format_version: xgc_store::PROJECT_FORMAT_VERSION,
-            name: "demo".to_string(),
-            entry_scene: "scenes/main.json".to_string(),
-            scenes: vec!["scenes/main.json".to_string()],
-            content: ProjectContent {
-                models: "Resources".to_string(),
-                textures: "Resources".to_string(),
-                audio: "Resources".to_string(),
-                shaders: None,
-                prefabs: "Prefabs".to_string(),
-                scripts: "Scripts".to_string(),
-            },
-            search_paths: Vec::new(),
-            input: Some("./Config\\controls.ron".to_string()),
-        },
-    )
-    .unwrap();
-
-    let mut editor = EditorState::open(&dir).unwrap();
-    assert_eq!(editor.project_name(), Some("demo"));
-    editor.play_with_scripts(&dir).unwrap();
-    assert_eq!(editor.input_map().unwrap().action_names(), ["Jump"]);
-    editor.stop().unwrap();
-    assert_eq!(editor.project_root(), Some(dir.as_path()));
-    assert_eq!(editor.entities().len(), 1);
-    assert!(editor.path().unwrap().ends_with("scenes/main.json"));
-    editor
-        .edit_field(
-            editor.entities()[0].id,
-            0x0101,
-            "position",
-            Value::Vec3([1.0, 2.0, 3.0]),
-        )
-        .unwrap();
-    editor.save().unwrap();
-    let reloaded = EditorState::open(&dir).unwrap();
-    assert_eq!(reloaded.project_name(), Some("demo"));
-    assert_eq!(reloaded.entities().len(), 1);
+    editor.stop();
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

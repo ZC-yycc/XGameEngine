@@ -34,7 +34,7 @@
 
 ## 用编辑器与播放器打开迁移项目
 
-从 `xgc/` 运行 `cargo run -p xgc-editor --offline -- ../tmp/xgc-project` 打开入口场景。在层级面板的 `Scenes` 中切换关卡，用 `Play Scripts` 运行项目脚本。播放器可用 `cargo run -p xgc-player --offline -- ../tmp/xgc-project/project.xgc --scene character` 打开角色场景，加入帧数可无头运行。两个宿主都支持项目目录和清单文件，视口与脚本从项目根解析 GUID。窗口输入使用清单的 `input` 路径，未登记时不绑定动作，登记的文件读取或解析失败时报告错误。
+从 `xgc/` 运行 `cargo run -p xgc-editor --offline -- ../tmp/xgc-project` 打开入口场景。在层级面板的 `Scenes` 中切换关卡。`Play` 用项目脚本按 60 Hz 运行编辑世界的副本，`Pause` 后可 `Step` 一次或 `Resume`，`Stop` 返回原编辑世界、选择及历史。播放器可用 `cargo run -p xgc-player --offline -- ../tmp/xgc-project/project.xgc --scene character` 打开角色场景，加入帧数可无头运行。两个宿主都支持项目目录和清单文件，视口与脚本从项目根解析 GUID。窗口输入使用清单的 `input` 路径，未登记时不绑定动作，登记的文件读取或解析失败时报告错误。整体窗口的三档尺寸仍须验收。
 
 ## 结构化反射与文件版本
 

@@ -14,6 +14,7 @@ pub use assets_ops::{AssetEntry, AssetKind};
 pub use transform_ops::snap;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use xgc_base::EntityId;
 use xgc_reflect::{FieldSchema, Registry, Value};
@@ -43,11 +44,13 @@ pub struct ComponentRow {
 }
 
 struct PlaySession {
-    before: WorldData,
+    selected: Option<EntityId>,
     simulation: Simulation,
     particles: ParticleSystem,
-    runtime: Option<ScriptRuntime>,
+    runtime: ScriptRuntime,
     input: Option<InputMap>,
+    paused: bool,
+    elapsed: Duration,
     /// 根运动轨道表：进入 Play 时从播放世界的模型资产建一次（与 CLI 宿主同源）。
     root_motion: RootMotionLibrary,
 }
@@ -172,7 +175,7 @@ impl EditorState {
             .map(|session| session.manifest().name.as_str())
     }
 
-    /// 项目根；单场景打开时为 None。视口与 Play Scripts 从这里找项目资产。
+    /// 项目根；单场景打开时为 None。视口与 Play 从这里找项目资产。
     pub fn project_root(&self) -> Option<&Path> {
         self.project.as_ref().map(ProjectSession::root)
     }
@@ -209,11 +212,17 @@ impl EditorState {
     }
 
     pub fn selected(&self) -> Option<EntityId> {
-        self.selected
+        match &self.play {
+            Some(session) => session.selected,
+            None => self.selected,
+        }
     }
 
     pub fn select(&mut self, id: Option<EntityId>) {
-        self.selected = id;
+        match &mut self.play {
+            Some(session) => session.selected = id,
+            None => self.selected = id,
+        }
     }
 
     pub fn camera_entity(&self) -> Option<EntityId> {
@@ -234,6 +243,9 @@ impl EditorState {
 
     /// 轨道相机：yaw 绕 Y、pitch 抬升、distance 为半径；写 Transform 与 GlobalTransform。
     pub fn set_camera_orbit(&mut self, yaw: f32, pitch: f32, distance: f32) -> Result<(), String> {
+        if self.is_playing() {
+            return Err("Play 期间不能编辑场景相机".to_string());
+        }
         let id = self
             .camera_entity()
             .ok_or_else(|| "场景没有 active 相机".to_string())?;
@@ -472,7 +484,7 @@ impl EditorState {
     }
 
     pub fn inspector(&self) -> Vec<ComponentRow> {
-        let Some(id) = self.selected else {
+        let Some(id) = self.selected() else {
             return Vec::new();
         };
         let Some(data) = self.entity_data(id) else {

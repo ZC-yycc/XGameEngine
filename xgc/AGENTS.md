@@ -120,12 +120,12 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-editor/src/assets_ops.rs` | `EditorState::assets()`：只读扫描清单内容目录，规范化与去重、确定性截断、隐藏 / 链接 / `.meta` 排除；不生成元数据 |
 | `crates/xgc-editor/src/app/assets_panel.rs` | 资产折叠面板：首次展开缓存，Refresh 手动刷新，虚拟列表与长路径省略；点选预制体只回填工具栏路径 |
 | `crates/xgc-editor/src/app/assets_panel/tests.rs` | 资产回归：2000 条上限与排序、只读、Windows 隐藏属性、折叠 / 缓存 / 刷新、有效预制体点选不实例化 |
-| `crates/xgc-editor/src/play.rs` | Play / Play Scripts / 清单输入映射 / step / stop，项目脚本与根运动共用 GUID 目录 |
+| `crates/xgc-editor/src/play.rs` | Play / Pause / Step / Stop，项目脚本与根运动共用 GUID 目录；固定步只改播放副本 |
 | `crates/xgc-editor/src/transform_ops.rs` | 位置 / 缩放 / 旋转 setter 与 Gizmo 旋转；无父节点同步 GlobalTransform；`snap` |
 | `crates/xgc-editor/src/prefab_ops.rs` | 从 `.prefab.json` 实例化并选中根，按所选成员的 GUID 或项目相对路径加载来源并 Revert |
 | `crates/xgc-editor/src/gizmo.rs` | 视口 MVP 投影与线段命中距离 |
 | `crates/xgc-editor/src/app.rs` | eframe 窗口：层级 / 场景列表 / 资产浏览 / wgpu 视口 / 选中高亮 / 轨道相机 / Move·Rotate·Scale Gizmo / 吸附 / Ctrl+Z、Ctrl+Y / 底部状态栏；`app/inspector.rs` 按 schema 递归生成控件并提交编辑事务，`app/inspector/containers.rs` 处理映射增删和枚举切换 |
-| `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play / Play Scripts / 吸附 |
+| `crates/xgc-editor/src/app/toolbar.rs` | 顶部工具栏：保存 / 预制体 / Revert / Play、Pause、Step、Resume、Stop / 吸附 |
 | `crates/xgc-editor/src/main.rs` | `xgc-editor [世界.json]` 入口 |
 | `crates/xgc-asset/src/lib.rs` | 扫描 `.meta`、`guid://` → 路径的只读资产目录 |
 | `crates/xgc-asset/src/cook.rs` | `cook_project` / `cook_project_filtered`：按 GUID 裁剪、`.meta` / `.bin` 伴生、哈希未变跳过写入、清陈旧文件、manifest 聚合签名与校验 |
