@@ -11,13 +11,7 @@ use serde::{Deserialize, Serialize};
 use xgc_base::EntityId;
 use xgc_reflect::{Component, ComponentId, Value};
 
-use super::{
-    AnimationLayers, AnimationState, Animator, AudioGain, AudioListener, AudioMixer, AudioSource,
-    Bone, Camera, CharacterController, Column, EntitySnapshot, GlobalTransform, LodGroup, Material,
-    MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, PrefabInstance,
-    SceneEnvironment, Script, Skeleton, SkeletonPose, Slope, Transform, UiElement, UiInput,
-    UiInteraction, UiLayout, Velocity, World,
-};
+use super::{Column, EntitySnapshot, SceneEnvironment, World};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntityData {
@@ -122,39 +116,6 @@ fn push_component<T: Component>(
 }
 
 impl World {
-    pub(crate) fn register_builtin_components(&mut self) {
-        self.register_component::<Transform>();
-        self.register_component::<Velocity>();
-        self.register_component::<Name>();
-        self.register_component::<Parent>();
-        self.register_component::<GlobalTransform>();
-        self.register_component::<MeshRenderer>();
-        self.register_component::<Material>();
-        self.register_component::<LodGroup>();
-        self.register_component::<Camera>();
-        self.register_component::<Script>();
-        self.register_component::<AudioSource>();
-        self.register_component::<AudioListener>();
-        self.register_component::<AudioGain>();
-        self.register_component::<AudioMixer>();
-        self.register_component::<PhysicsBody>();
-        self.register_component::<Animator>();
-        self.register_component::<AnimationState>();
-        self.register_component::<AnimationLayers>();
-        self.register_component::<CharacterController>();
-        self.register_component::<UiElement>();
-        self.register_component::<UiLayout>();
-        self.register_component::<UiInteraction>();
-        self.register_component::<UiInput>();
-        self.register_component::<Slope>();
-        self.register_component::<Skeleton>();
-        self.register_component::<Bone>();
-        self.register_component::<SkeletonPose>();
-        self.register_component::<ParticleEmitter>();
-        self.register_component::<PluginComponent>();
-        self.register_component::<PrefabInstance>();
-    }
-
     pub fn register_component<T: Component>(&mut self) {
         self.factories.insert(T::ID, ComponentFactory::new::<T>());
     }

@@ -258,7 +258,7 @@ cargo run -q --release -p xgc-cli --offline -- bench
 - **编辑器资产浏览**：`EditorState::assets()` 只读清单内容目录，路径先走 `normalize_project_relative`，重叠根按规范目录去重；每层先排序再递归截到 2000 条，隐藏文件 / Windows Hidden / 符号链接与 reparse point / `.meta` 不进入清单。UI 只在首次展开或点击 Refresh 时扫描（每帧只读缓存），长路径截断并以悬停显示全文；点选预制体只回填路径，实例化仍由工具栏 Prefab 按钮发起。不得在浏览时生成 `.meta` 或改世界。
 
 - 一个组件一个稳定 `ComponentId`；注册表按 ID 排序输出，schema 必须确定性。
-- **新增组件要同时改两处**：`registry.rs::builtin_registry`（schema/Agent）与 `data.rs::register_builtin_components`（World 工厂），缺一不可。
+- **新增内建组件只登记一次**：`crates/xgc-world/src/registry.rs` 的 `builtin_components!` 同时生成反射目录和 World 工厂注册。`crates/xgc-world/tests/schema.rs` 验证每个 schema 缺省值都能构造实际组件。
 - `EntityId` 是持久身份，`EntityKey` 是运行时句柄；句柄复用必须换 generation。
 - `Replace` 会销毁并重建实体行，**旧 EntityKey 失效**，按 ID 重取句柄。
 - archetype 的每一行列长度必须相等；`despawn` 用 `swap_remove` 并修正被搬实体行号。

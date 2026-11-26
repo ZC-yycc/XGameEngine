@@ -1,106 +1,63 @@
-//! 内建组件注册表的唯一入口：CLI / Agent / schema 门禁都从这里取，避免各处
-//! 再抄一份组件清单。
+//! 内建组件的类型清单同时生成反射目录与世界工厂注册，避免 schema 宣告了世界无法构造的组件。
 
-use xgc_reflect::Registry;
+use xgc_reflect::{Component, Registry};
 
 use super::{
     AnimationLayers, AnimationState, Animator, AudioGain, AudioListener, AudioMixer, AudioSource,
     Bone, Camera, CharacterController, GlobalTransform, LodGroup, Material, MeshRenderer, Name,
     Parent, ParticleEmitter, PhysicsBody, PluginComponent, PrefabInstance, Script, Skeleton,
-    SkeletonPose, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout, Velocity,
+    SkeletonPose, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout, Velocity, World,
 };
 
-pub fn builtin_registry() -> Registry {
-    let mut registry = Registry::new();
-    registry
-        .register::<Transform>()
-        .expect("内置组件注册失败：core.transform");
-    registry
-        .register::<Velocity>()
-        .expect("内置组件注册失败：core.velocity");
-    registry
-        .register::<Name>()
-        .expect("内置组件注册失败：core.name");
-    registry
-        .register::<Parent>()
-        .expect("内置组件注册失败：core.parent");
-    registry
-        .register::<GlobalTransform>()
-        .expect("内置组件注册失败：core.global_transform");
-    registry
-        .register::<MeshRenderer>()
-        .expect("内置组件注册失败：render.mesh");
-    registry
-        .register::<Material>()
-        .expect("内置组件注册失败：render.material");
-    registry
-        .register::<LodGroup>()
-        .expect("内置组件注册失败：render.lod");
-    registry
-        .register::<Camera>()
-        .expect("内置组件注册失败：render.camera");
-    registry
-        .register::<Script>()
-        .expect("内置组件注册失败：script.lua");
-    registry
-        .register::<AudioSource>()
-        .expect("内置组件注册失败：audio.source");
-    registry
-        .register::<AudioListener>()
-        .expect("内置组件注册失败：audio.listener");
-    registry
-        .register::<AudioGain>()
-        .expect("内置组件注册失败：audio.gain");
-    registry
-        .register::<AudioMixer>()
-        .expect("内置组件注册失败：audio.mixer");
-    registry
-        .register::<PhysicsBody>()
-        .expect("内置组件注册失败：physics.body");
-    registry
-        .register::<Animator>()
-        .expect("内置组件注册失败：animation.animator");
-    registry
-        .register::<AnimationState>()
-        .expect("内置组件注册失败：animation.state");
-    registry
-        .register::<AnimationLayers>()
-        .expect("内置组件注册失败：animation.layers");
-    registry
-        .register::<CharacterController>()
-        .expect("内置组件注册失败：physics.character");
-    registry
-        .register::<UiElement>()
-        .expect("内置组件注册失败：ui.element");
-    registry
-        .register::<UiLayout>()
-        .expect("内置组件注册失败：ui.layout");
-    registry
-        .register::<UiInteraction>()
-        .expect("内置组件注册失败：ui.interaction");
-    registry
-        .register::<UiInput>()
-        .expect("内置组件注册失败：ui.input");
-    registry
-        .register::<Slope>()
-        .expect("内置组件注册失败：physics.slope");
-    registry
-        .register::<Skeleton>()
-        .expect("内置组件注册失败：animation.skeleton");
-    registry
-        .register::<Bone>()
-        .expect("内置组件注册失败：animation.bone");
-    registry
-        .register::<SkeletonPose>()
-        .expect("内置组件注册失败：animation.pose");
-    registry
-        .register::<ParticleEmitter>()
-        .expect("内置组件注册失败：particle.emitter");
-    registry
-        .register::<PluginComponent>()
-        .expect("内置组件注册失败：plugin.rust");
-    registry
-        .register::<PrefabInstance>()
-        .expect("内置组件注册失败：prefab.instance");
-    registry
+macro_rules! builtin_components {
+    ($($component:ty),+ $(,)?) => {
+        pub fn builtin_registry() -> Registry {
+            let mut registry = Registry::new();
+            $(
+                registry.register::<$component>().unwrap_or_else(|error| {
+                    panic!("内建组件 {} 注册失败：{error}", <$component as Component>::NAME)
+                });
+            )+
+            registry
+        }
+
+        impl World {
+            pub(crate) fn register_builtin_components(&mut self) {
+                $(self.register_component::<$component>();)+
+            }
+        }
+    };
 }
+
+builtin_components![
+    Transform,
+    Velocity,
+    Name,
+    Parent,
+    GlobalTransform,
+    MeshRenderer,
+    Material,
+    Camera,
+    LodGroup,
+    Script,
+    AudioSource,
+    AudioListener,
+    AudioGain,
+    AudioMixer,
+    PhysicsBody,
+    CharacterController,
+    Slope,
+    Animator,
+    Skeleton,
+    Bone,
+    SkeletonPose,
+    AnimationState,
+    AnimationLayers,
+    UiElement,
+    UiLayout,
+    UiInteraction,
+    UiInput,
+    ParticleEmitter,
+    PluginComponent,
+    PrefabInstance,
+];

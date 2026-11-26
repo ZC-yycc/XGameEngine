@@ -1,6 +1,7 @@
-//! 内建注册表回归：CLI / Agent / xtask 共用同一份清单。
+//! 内建注册表回归：CLI、Agent、Inspector 和世界组件工厂共用同一份声明。
 
-use xgc_world::builtin_registry;
+use xgc_base::EntityId;
+use xgc_world::{builtin_registry, ComponentData, ComponentId, EntityData, World};
 
 #[test]
 fn builtin_registry_has_stable_types() {
@@ -50,5 +51,34 @@ fn builtin_registry_has_stable_types() {
         assert_eq!(first.id, second.id);
         assert_eq!(first.name, second.name);
         assert_eq!(first.fields.len(), second.fields.len());
+    }
+}
+
+#[test]
+fn builtin_schema_defaults_can_construct_every_component() {
+    let world = World::new();
+    for schema in builtin_registry().schema().types {
+        let component = ComponentId(schema.id);
+        let mut data = EntityData::new(EntityId::from_raw(0));
+        data.components.push(ComponentData {
+            component,
+            fields: schema
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.default.clone()))
+                .collect(),
+        });
+        let snapshot = world
+            .snapshot_from_data(&data)
+            .unwrap_or_else(|error| panic!("{} 的 schema 无法构造组件：{error}", schema.name));
+        assert_eq!(snapshot.component_ids(), [component]);
+        for field in &schema.fields {
+            assert!(
+                snapshot.get(component, &field.name).is_some(),
+                "{} 缺少 schema 字段 {}",
+                schema.name,
+                field.name
+            );
+        }
     }
 }
