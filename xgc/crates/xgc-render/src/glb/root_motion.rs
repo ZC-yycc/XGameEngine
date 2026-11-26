@@ -43,14 +43,13 @@ pub(crate) fn strip(
 impl AnimationSet {
     /// 抽出模型的根运动轨道（按节点名索引，给 `xgc_sim::apply_root_motion` 用）。
     ///
-    /// 只取平移通道；匿名节点进不了表（旧端同样按名字找节点）。CUBICSPLINE 在
-    /// 解析阶段就被拒，所以这里只剩 LINEAR / STEP 两种采样方式。
+    /// 只取具名节点的平移通道。样条沿用姿势采样的关键帧分组，保留每帧的两条切线。
     pub fn root_motion_set(&self) -> RootMotionSet {
         let mut clips = Vec::new();
         for clip in &self.clips {
             let mut tracks = Vec::new();
             for channel in &clip.channels {
-                if !matches!(channel.path, AnimationPath::Translation) {
+                if channel.path != AnimationPath::Translation || !channel.has_complete_keys() {
                     continue;
                 }
                 let Some(node) = self.nodes.get(channel.node) else {
@@ -59,15 +58,20 @@ impl AnimationSet {
                 if node.name.is_empty() {
                     continue;
                 }
-                let values: Vec<[f32; 3]> = channel
-                    .values
-                    .chunks_exact(3)
-                    .map(|value| [value[0], value[1], value[2]])
-                    .collect();
-                let step = matches!(channel.interpolation, Interpolation::Step);
-                let Some(track) = RootMotionTrack::new(channel.times.clone(), values, step) else {
-                    continue;
+                let times = channel.times.clone();
+                let frames = 0..times.len();
+                let track = match channel.interpolation {
+                    Interpolation::Linear | Interpolation::Step => RootMotionTrack::new(
+                        times,
+                        frames.map(|frame| channel.key_value(frame)).collect(),
+                        channel.interpolation == Interpolation::Step,
+                    ),
+                    Interpolation::CubicSpline => RootMotionTrack::new_cubic_spline(
+                        times,
+                        frames.map(|frame| channel.cubic_key(frame)).collect(),
+                    ),
                 };
+                let Some(track) = track else { continue };
                 tracks.push(RootMotionNodeTrack {
                     node: node.name.clone(),
                     track,

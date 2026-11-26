@@ -7,9 +7,9 @@
 //! `Animator` 的剪辑名与时间采样，算出的关节全局矩阵正好是现有蒙皮 palette
 //! 路径要的 `pose`（`palette_bytes` 再乘逆绑定矩阵）。
 //!
-//! 采样口径与旧运行时一致：LINEAR 对平移 / 缩放做线性插值、对旋转做 slerp；
-//! STEP 取前一关键帧；时间按 looping 取模。CUBICSPLINE 暂不支持——遇到时明确
-//! 报错而不是悄悄降级（当前割接资产 Fox / Box 全是 LINEAR）。
+//! LINEAR 对平移 / 缩放做线性插值、对旋转做 slerp；STEP 取前一关键帧。
+//! CUBICSPLINE 保留入切线、值、出切线，按 Hermite 基函数采样。时间按 looping
+//! 取模或钳制。
 //!
 //! 只处理节点 TRS 通道；morph target 的 `weights` 通道直接跳过（XGC 的 morph 走
 //! 组件覆盖，不从这里驱动），未知 path 也跳过而不是让整个模型加载失败。
@@ -18,7 +18,9 @@ use serde::Deserialize;
 
 use crate::camera::{mul, Mat4};
 
-use super::{accessor_layout, read_f32, MeshError, Root};
+use super::{accessor_layout, read_f32, Accessor, MeshError, Root};
+
+mod sample;
 
 const COMPONENT_F32: u32 = 5126;
 
@@ -93,11 +95,12 @@ impl AnimationPath {
     }
 }
 
-/// 关键帧插值方式。旧运行时支持三种，XGC 目前只接入 LINEAR / STEP。
+/// glTF 关键帧插值方式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interpolation {
     Linear,
     Step,
+    CubicSpline,
 }
 
 impl Interpolation {
@@ -105,6 +108,7 @@ impl Interpolation {
         match self {
             Self::Linear => "LINEAR",
             Self::Step => "STEP",
+            Self::CubicSpline => "CUBICSPLINE",
         }
     }
 
@@ -112,9 +116,15 @@ impl Interpolation {
         match text.to_ascii_uppercase().as_str() {
             "LINEAR" => Ok(Self::Linear),
             "STEP" => Ok(Self::Step),
-            other => Err(MeshError::Unsupported(format!(
-                "动画插值 {other}（只支持 LINEAR / STEP；CUBICSPLINE 尚未接入）"
-            ))),
+            "CUBICSPLINE" => Ok(Self::CubicSpline),
+            other => Err(MeshError::Unsupported(format!("动画插值 {other}"))),
+        }
+    }
+
+    fn values_per_key(self) -> usize {
+        match self {
+            Self::Linear | Self::Step => 1,
+            Self::CubicSpline => 3,
         }
     }
 }
@@ -130,7 +140,7 @@ pub struct AnimationNode {
     pub scale: [f32; 3],
 }
 
-/// 一条 TRS 通道的关键帧。`values` 平铺：每个关键帧占 `path.components()` 个 f32。
+/// 一条 TRS 通道的关键帧。`values` 按帧平铺，样条帧依次存入切线、值、出切线。
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnimationChannel {
     pub node: usize,
@@ -138,58 +148,6 @@ pub struct AnimationChannel {
     pub interpolation: Interpolation,
     pub times: Vec<f32>,
     pub values: Vec<f32>,
-}
-
-impl AnimationChannel {
-    fn stride(&self) -> usize {
-        self.path.components()
-    }
-
-    fn key_value(&self, key: usize) -> [f32; 4] {
-        let stride = self.stride();
-        let start = key * stride;
-        let mut out = [0.0; 4];
-        out[..stride].copy_from_slice(&self.values[start..start + stride]);
-        out
-    }
-
-    /// 在 `time` 处采样；调用方保证 `times` 非空且递增。
-    fn sample(&self, time: f32) -> [f32; 4] {
-        if self.times.is_empty() {
-            return [0.0; 4];
-        }
-        let last = self.times.len() - 1;
-        if time <= self.times[0] {
-            return self.key_value(0);
-        }
-        if time >= self.times[last] {
-            return self.key_value(last);
-        }
-        let mut index = 0;
-        while index + 1 < self.times.len() && self.times[index + 1] <= time {
-            index += 1;
-        }
-        let (start, end) = (self.times[index], self.times[index + 1]);
-        let u = if end > start {
-            (time - start) / (end - start)
-        } else {
-            0.0
-        };
-        let a = self.key_value(index);
-        let b = self.key_value(index + 1);
-        match self.interpolation {
-            Interpolation::Step => a,
-            Interpolation::Linear => match self.path {
-                AnimationPath::Rotation => slerp(a, b, u),
-                _ => [
-                    lerp(a[0], b[0], u),
-                    lerp(a[1], b[1], u),
-                    lerp(a[2], b[2], u),
-                    0.0,
-                ],
-            },
-        }
-    }
 }
 
 /// 一个 glTF 动画剪辑。
@@ -276,7 +234,9 @@ impl AnimationSet {
             let Some(node) = locals.get_mut(channel.node) else {
                 continue;
             };
-            let value = channel.sample(time);
+            let Some(value) = channel.sample(time) else {
+                continue;
+            };
             match channel.path {
                 AnimationPath::Translation => node.translation = [value[0], value[1], value[2]],
                 AnimationPath::Rotation => node.rotation = [value[0], value[1], value[2], value[3]],
@@ -383,18 +343,22 @@ pub(super) fn parse(root: &Root, bin: &[u8]) -> Result<Option<AnimationSet>, Mes
             if times.is_empty() {
                 continue;
             }
-            let stride = path.components();
-            let values = read_values(root, sampler.output, bin, stride)?;
-            if values.len() != times.len() * stride {
-                return Err(MeshError::Glb(format!(
-                    "动画关键帧数量不一致：{} 帧 × {stride} != {} 个值",
-                    times.len(),
-                    values.len()
-                )));
+            if times.iter().any(|time| !time.is_finite()) {
+                return Err(MeshError::Glb("动画时间轴有非有限值".into()));
             }
-            if times.windows(2).any(|pair| pair[1] < pair[0]) {
+            if times.windows(2).any(|pair| {
+                pair[1] < pair[0]
+                    || (interpolation == Interpolation::CubicSpline && pair[1] == pair[0])
+            }) {
                 return Err(MeshError::Glb("动画时间轴不是递增".into()));
             }
+            let values = read_values(
+                root,
+                sampler.output,
+                bin,
+                path.components(),
+                times.len() * interpolation.values_per_key(),
+            )?;
             duration = duration.max(*times.last().unwrap_or(&0.0));
             channels.push(AnimationChannel {
                 node,
@@ -446,7 +410,7 @@ fn read_times(root: &Root, accessor: usize, bin: &[u8]) -> Result<Vec<f32>, Mesh
             definition.ty, definition.component_type
         )));
     }
-    let (base, stride) = accessor_layout(root, definition, 4)?;
+    let (base, stride) = checked_animation_layout(root, definition, 4, bin.len())?;
     let mut out = Vec::with_capacity(definition.count);
     for index in 0..definition.count {
         out.push(read_f32(bin, base + index * stride)?);
@@ -459,6 +423,7 @@ fn read_values(
     accessor: usize,
     bin: &[u8],
     components: usize,
+    expected_count: usize,
 ) -> Result<Vec<f32>, MeshError> {
     let definition = root
         .accessors
@@ -475,8 +440,14 @@ fn read_values(
             definition.ty, definition.component_type
         )));
     }
+    if definition.count != expected_count {
+        return Err(MeshError::Glb(format!(
+            "动画关键帧数量不一致：需要 {expected_count} 个 {expected}，实际 {} 个",
+            definition.count
+        )));
+    }
     let element_size = components * 4;
-    let (base, stride) = accessor_layout(root, definition, element_size)?;
+    let (base, stride) = checked_animation_layout(root, definition, element_size, bin.len())?;
     let mut out = Vec::with_capacity(definition.count * components);
     for index in 0..definition.count {
         let start = base + index * stride;
@@ -485,6 +456,34 @@ fn read_values(
         }
     }
     Ok(out)
+}
+
+fn checked_animation_layout(
+    root: &Root,
+    accessor: &Accessor,
+    element_size: usize,
+    bin_len: usize,
+) -> Result<(usize, usize), MeshError> {
+    let view = accessor
+        .buffer_view
+        .and_then(|index| root.buffer_views.get(index));
+    if view.is_some_and(|view| view.byte_offset.checked_add(accessor.byte_offset).is_none()) {
+        return Err(MeshError::Glb("动画访问器偏移溢出".into()));
+    }
+    let (base, stride) = accessor_layout(root, accessor, element_size)?;
+    if accessor.count == 0 {
+        return Ok((base, stride));
+    }
+    // 在按 count 分配前确认最后一个元素仍落在这个 bufferView 和 BIN 内。
+    let end = (accessor.count - 1)
+        .checked_mul(stride)
+        .and_then(|last| base.checked_add(last))
+        .and_then(|last| last.checked_add(element_size))
+        .ok_or_else(|| MeshError::Glb("动画访问器长度溢出".into()))?;
+    if end > bin_len || view.is_some_and(|view| end - view.byte_offset > view.byte_length) {
+        return Err(MeshError::Glb("动画访问器超出 bufferView 或 BIN".into()));
+    }
+    Ok((base, stride))
 }
 
 /// 列主序 `T * R * S`（平移不缩放，缩放逐列乘）。

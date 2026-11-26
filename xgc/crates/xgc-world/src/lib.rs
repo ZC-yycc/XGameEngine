@@ -62,9 +62,9 @@ pub use prefab_ops::{instantiate_prefab, remap_parent, revert_prefab};
 pub use registry::builtin_registry;
 pub use render_components::{Camera, Material, MeshRenderer};
 pub use root_motion::{
-    filter_axes, root_motion_delta, to_local_position, to_world_delta, MotionFade, MotionSpan,
-    RootMotion, RootMotionClip, RootMotionLibrary, RootMotionNodeTrack, RootMotionSet,
-    RootMotionTrack, ROOT_MOTION_AXES_DEFAULT,
+    filter_axes, root_motion_delta, to_local_position, to_world_delta, CubicSplineSegment,
+    MotionFade, MotionSpan, RootMotion, RootMotionClip, RootMotionLibrary, RootMotionNodeTrack,
+    RootMotionSet, RootMotionTrack, ROOT_MOTION_AXES_DEFAULT,
 };
 pub use skeleton_components::{Bone, Skeleton, SkeletonPose};
 pub use slope_components::Slope;

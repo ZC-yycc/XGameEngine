@@ -56,6 +56,10 @@
 
 `script.check` 及 MCP 的 `script_check` 接受内联 Lua 源码，`xgc script-check <脚本.lua>` 读取单文件。这两个入口和项目体检都调用运行时的 Lua 5.4 文本编译器，语法错误为 `SCRIPT.COMPILE`，包含可确定的脚本名与行号。检查不执行脚本。 [脚本检查回归](crates/xgc-agent/tests/script_check.rs)
 
+## glTF 动画插值
+
+glTF 的三次样条 TRS 轨道保留入切线、关键值和出切线。姿势和根运动共用 Hermite 采样，切线按段长缩放。旋转在采样后归一化，退化时用关键帧间的球面插值。回归覆盖两秒段、循环根运动、退化旋转，以及错误输出组数和越界访问器。[glTF 动画回归](crates/xgc-render/tests/animations.rs)
+
 ## 结构化反射与文件版本
 
 Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑时间和名称，并撤销修改。Agent 使用 `animation.animator:events[0].time` 查询，在 `edit.plan` 的组件字段中写 `events[0].time`。路径下标从 0 起。Lua `xgc.get` 返回的列表按 Lua 约定从 1 起，`xgc.set` 可以按零基路径改写叶字段。

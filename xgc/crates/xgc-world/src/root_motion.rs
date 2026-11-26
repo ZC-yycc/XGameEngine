@@ -17,6 +17,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+mod spline;
+pub use spline::CubicSplineSegment;
+
 /// 根运动只取水平面：走路剪辑的髋部起伏不该把角色抬离地面。
 pub const ROOT_MOTION_AXES_DEFAULT: [bool; 3] = [true, false, true];
 
@@ -60,50 +63,77 @@ impl RootMotion {
     }
 }
 
-/// 一条根节点平移轨道。`values` 与 `times` 等长，逐帧三维。
+/// 一条根节点平移轨道。关键帧值与时间轴等长，逐帧三维。
 #[derive(Clone, Debug, PartialEq)]
 pub struct RootMotionTrack {
-    pub times: Vec<f32>,
-    pub values: Vec<[f32; 3]>,
-    /// true = STEP（保持前一关键帧），false = LINEAR。
-    pub step: bool,
+    times: Vec<f32>,
+    values: RootMotionValues,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RootMotionValues {
+    Linear(Vec<[f32; 3]>),
+    Step(Vec<[f32; 3]>),
+    /// 每帧依次是入切线、值、出切线。
+    CubicSpline(Vec<[[f32; 3]; 3]>),
 }
 
 impl RootMotionTrack {
     pub fn new(times: Vec<f32>, values: Vec<[f32; 3]>, step: bool) -> Option<Self> {
-        if times.is_empty() || times.len() != values.len() {
+        if !Self::valid_times(&times, values.len()) {
             return None;
         }
-        if times.iter().any(|time| !time.is_finite()) {
+        let values = if step {
+            RootMotionValues::Step(values)
+        } else {
+            RootMotionValues::Linear(values)
+        };
+        Some(Self { times, values })
+    }
+
+    /// 接收 glTF 按入切线、值、出切线排列的关键帧。
+    pub fn new_cubic_spline(times: Vec<f32>, keys: Vec<[[f32; 3]; 3]>) -> Option<Self> {
+        if !Self::valid_times(&times, keys.len()) || times.windows(2).any(|pair| pair[0] >= pair[1])
+        {
             return None;
         }
         Some(Self {
             times,
-            values,
-            step,
+            values: RootMotionValues::CubicSpline(keys),
         })
     }
 
-    /// 采样（LINEAR 插值 / STEP 保持），两端钳到首末帧。
+    fn valid_times(times: &[f32], keys: usize) -> bool {
+        !times.is_empty() && times.len() == keys && times.iter().all(|time| time.is_finite())
+    }
+
+    /// 两端钳到首末关键值，样条和渲染姿势使用相同的段定位与求值。
     pub fn sample(&self, time: f32) -> [f32; 3] {
-        if time.is_nan() {
-            return self.values[0];
+        let (values, step) = match &self.values {
+            RootMotionValues::Linear(values) => (values, false),
+            RootMotionValues::Step(values) => (values, true),
+            RootMotionValues::CubicSpline(keys) => {
+                let segment = CubicSplineSegment::at(&self.times, time);
+                let [_, start, outgoing] = keys[segment.lower];
+                let [incoming, end, _] = keys[segment.upper];
+                return segment.sample(start, outgoing, end, incoming);
+            }
+        };
+        if time.is_nan() || time <= self.times[0] {
+            return values[0];
         }
         let last = self.times.len() - 1;
-        if time <= self.times[0] {
-            return self.values[0];
-        }
         if time >= self.times[last] {
-            return self.values[last];
+            return values[last];
         }
         let upper = self.times.partition_point(|&key| key < time).min(last);
         let lower = upper.saturating_sub(1);
         let span = self.times[upper] - self.times[lower];
-        if self.step || span <= 0.0 {
-            return self.values[lower];
+        if step || span <= 0.0 {
+            return values[lower];
         }
         let u = ((time - self.times[lower]) / span).clamp(0.0, 1.0);
-        lerp3(self.values[lower], self.values[upper], u)
+        lerp3(values[lower], values[upper], u)
     }
 }
 
