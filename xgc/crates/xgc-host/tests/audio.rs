@@ -3,7 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use xgc_host::{asset_paths, ScriptedRunner, AUDIO_SAMPLE_RATE};
 use xgc_sim::{load_wav, write_wav_mono};
-use xgc_world::{AudioMixer, Script, World};
+use xgc_world::{
+    AudioMixer, AudioSource, Command, Component, ComponentData, GlobalTransform, Name, Parent,
+    Script, Transform, Value, World,
+};
 
 #[test]
 fn lua_sound_commands_use_search_paths_and_mix_in_frame_order() {
@@ -71,6 +74,101 @@ fn lua_sound_commands_use_search_paths_and_mix_in_frame_order() {
         assert!(block.iter().all(|value| *value == sample * gain));
         assert_eq!(runner.world().world_data(), author_data);
         assert_eq!(runner.world().state_hash(), initial_hash);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn autoplay_follows_the_entity_and_stops_when_the_source_is_removed() {
+    let root = std::env::temp_dir().join(format!(
+        "xgc_autoplay_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let clip = root.join("tone.wav");
+    let mut pcm = vec![0.5; 800];
+    pcm.extend([0.25; 800]);
+    pcm.extend([0.75; 800]);
+    write_wav_mono(&clip, AUDIO_SAMPLE_RATE, &pcm).unwrap();
+    let pcm = load_wav(&clip).unwrap().samples;
+    fs::write(
+        root.join("source.lua"),
+        r#"
+        local frame = 0
+        function update(ctx)
+            frame = frame + 1
+            if frame == 2 then
+                xgc.set(entity_id(ctx, 'parent'), 'core.transform', 'position', {x=2, y=0, z=0})
+                xgc.add(ctx.entity, 'core.velocity')
+            elseif frame == 3 then
+                xgc.remove(ctx.entity, 'audio.source')
+                play_sound(ctx, 'tone.wav', 0.5, 1)
+            elseif frame == 4 then
+                stop_all_sounds(ctx)
+                xgc.add(ctx.entity, 'audio.source')
+                xgc.set(ctx.entity, 'audio.source', 'clip', 'tone.wav')
+                xgc.set(ctx.entity, 'audio.source', 'autoplay', true)
+                xgc.set(ctx.entity, 'audio.source', 'spatial', false)
+                xgc.set(ctx.entity, 'audio.source', 'looping', true)
+            elseif frame == 5 then
+                stop_sound(ctx, 'tone.wav')
+            end
+        end
+        "#,
+    )
+    .unwrap();
+    let mut world = World::new();
+    let parent = world.spawn((
+        Name {
+            value: "parent".into(),
+        },
+        Transform {
+            position: [1.0, 0.0, 0.0],
+            ..Transform::default()
+        },
+        GlobalTransform::default(),
+    ));
+    let source = world.spawn((
+        Transform {
+            position: [1.0, 0.0, 0.0],
+            ..Transform::default()
+        },
+        GlobalTransform::default(),
+        Parent {
+            entity: world.entity(parent).unwrap(),
+        },
+        AudioSource {
+            clip: "tone.wav".into(),
+            autoplay: true,
+            looping: true,
+            ..AudioSource::default()
+        },
+    ));
+    let plan = world.plan(vec![Command::AddComponent {
+        entity: world.entity(source).unwrap(),
+        component: ComponentData {
+            component: Script::ID,
+            fields: vec![("path".into(), Value::String("source.lua".into()))],
+        },
+    }]);
+    world.apply(&plan).unwrap();
+    let (mut runner, _) = ScriptedRunner::with_assets(world, asset_paths(Some(&root), &[]));
+    let expected = [pcm[0] / 3.0, pcm[800] / 4.0, pcm[0] / 2.0, pcm[0], 0.0, 0.0];
+    for (index, expected) in expected.into_iter().enumerate() {
+        runner.step().unwrap();
+        let actual = runner.audio_samples();
+        assert!(
+            actual
+                .iter()
+                .all(|sample| (*sample - expected).abs() < 1e-7),
+            "第 {} 帧首个采样为 {}，预期 {expected}",
+            index + 1,
+            actual[0]
+        );
     }
     fs::remove_dir_all(root).unwrap();
 }

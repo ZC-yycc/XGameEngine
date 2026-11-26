@@ -1,9 +1,10 @@
 //! 玩法侧数据组件：脚本引用 / 音频源。这里只存作者数据，运行时由脚本 /
 //! 音频系统消费。
 
+use xgc_base::EntityKey;
 use xgc_reflect::{AssetKind, Component, ComponentId, FieldDescriptor, FieldType, Value};
 
-use crate::{Transform, World};
+use crate::{GlobalTransform, Transform, World};
 
 /// 声源所属的三个音量总线。主音量单独作用于混音结果。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -150,6 +151,19 @@ impl Default for AudioSource {
             autoplay: false,
             spatial: true,
             bus: "sfx".to_string(),
+        }
+    }
+}
+
+impl AudioSource {
+    pub fn play_sound(&self, world_position: [f32; 3]) -> PlaySound {
+        PlaySound {
+            clip: self.clip.clone(),
+            volume: self.volume,
+            pitch: self.pitch,
+            bus: AudioBus::from_name(&self.bus).unwrap_or_default(),
+            position: self.spatial.then_some(world_position),
+            looping: self.looping,
         }
     }
 }
@@ -412,6 +426,13 @@ pub fn audio_volume(gain: f32) -> f32 {
 }
 
 impl World {
+    pub fn audio_emitter_position(&self, key: EntityKey) -> [f32; 3] {
+        self.get::<GlobalTransform>(key)
+            .map(|global| global.position)
+            .or_else(|| self.get::<Transform>(key).map(|local| local.position))
+            .unwrap_or([0.0; 3])
+    }
+
     pub fn audio_mixer(&self) -> AudioMixer {
         let mut mixer = AudioMixer::default();
         self.for_each::<AudioMixer>(|_, config| mixer = *config);

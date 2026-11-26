@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use xgc_world::{audio_volume, AudioMixer, PlaySound};
+use xgc_base::EntityId;
+use xgc_world::{audio_volume, AudioMixer, AudioSource, PlaySound, World};
 
 use super::audio::{spatial_gain, AudioClip};
 
@@ -10,6 +11,7 @@ use super::audio::{spatial_gain, AudioClip};
 struct Voice {
     clip: Arc<AudioClip>,
     sound: PlaySound,
+    emitter: Option<EntityId>,
     frames: usize,
     phase: f64,
     step: f64,
@@ -72,7 +74,20 @@ impl SoftwareMixer {
         self.listener_position = position;
     }
 
-    pub fn play(&mut self, clip: Arc<AudioClip>, mut sound: PlaySound) {
+    pub fn play(&mut self, clip: Arc<AudioClip>, sound: PlaySound) {
+        self.start_voice(clip, sound, None);
+    }
+
+    pub fn play_emitter(&mut self, clip: Arc<AudioClip>, sound: PlaySound, emitter: EntityId) {
+        self.start_voice(clip, sound, Some(emitter));
+    }
+
+    fn start_voice(
+        &mut self,
+        clip: Arc<AudioClip>,
+        mut sound: PlaySound,
+        emitter: Option<EntityId>,
+    ) {
         let frames = clip.frames();
         if frames == 0 || clip.sample_rate == 0 {
             return;
@@ -88,9 +103,29 @@ impl SoftwareMixer {
         self.voices.push(Voice {
             clip,
             sound,
+            emitter,
             frames,
             phase: 0.0,
             step,
+        });
+    }
+
+    /// 按持久 ID 跟随组件所有者，实体删除或移除声源后只停它自己的声部。
+    pub fn sync_emitters(&mut self, world: &World) {
+        self.voices.retain_mut(|voice| {
+            let Some(emitter) = voice.emitter else {
+                return true;
+            };
+            let Some(key) = world.key(emitter) else {
+                return false;
+            };
+            if world.get::<AudioSource>(key).is_none() {
+                return false;
+            }
+            if let Some(position) = &mut voice.sound.position {
+                *position = world.audio_emitter_position(key);
+            }
+            true
         });
     }
 

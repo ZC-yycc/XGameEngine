@@ -3352,6 +3352,7 @@ dependencies = [
  "egui",
  "xgc-asset",
  "xgc-audio",
+ "xgc-base",
  "xgc-render",
  "xgc-script",
  "xgc-sim",

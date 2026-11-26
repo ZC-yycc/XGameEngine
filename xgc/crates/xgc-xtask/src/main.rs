@@ -158,6 +158,7 @@ fn deps(root: &Path) -> Result<(), String> {
             &[
                 "xgc-asset",
                 "xgc-audio",
+                "xgc-base",
                 "xgc-render",
                 "xgc-script",
                 "xgc-sim",
