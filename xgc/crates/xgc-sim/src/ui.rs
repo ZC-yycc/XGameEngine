@@ -1,6 +1,7 @@
 //! UI 布局：锚点 / 偏移 → 屏幕矩形，父节点相对布局与可见性继承。
 
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use xgc_base::EntityId;
 use xgc_world::{Component, Parent, UiElement, UiInput, UiInteraction, UiLayout, World};
@@ -20,6 +21,7 @@ impl Default for UiLayoutSystem {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Node {
     key: xgc_base::EntityKey,
     parent: Option<EntityId>,
@@ -29,6 +31,25 @@ struct Node {
     offset_max: [f32; 2],
     visible: bool,
     clip_children: bool,
+    state: LayoutState,
+}
+
+#[derive(Clone, Copy)]
+enum LayoutState {
+    Pending,
+    Visiting,
+    Resolved(UiLayout),
+}
+
+#[derive(Default)]
+struct LayoutScratch {
+    nodes: HashMap<EntityId, Node>,
+    ids: Vec<EntityId>,
+}
+
+thread_local! {
+    // 同线程的布局实例只复用容器容量。每次运行都从当前世界读取输入。
+    static LAYOUT_SCRATCH: RefCell<LayoutScratch> = RefCell::new(LayoutScratch::default());
 }
 
 impl System for UiLayoutSystem {
@@ -44,60 +65,52 @@ impl System for UiLayoutSystem {
     }
 
     fn run(&mut self, world: &mut World, _dt: f32) {
-        let viewport = self.viewport;
-        let mut nodes: HashMap<EntityId, Node> = HashMap::new();
-        world.for_each2::<UiElement, UiLayout>(|key, element, _| {
-            let Some(entity) = world.entity(key) else {
-                return;
+        LAYOUT_SCRATCH.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            let LayoutScratch { nodes, ids } = &mut *scratch;
+            nodes.clear();
+            ids.clear();
+            world.for_each2::<UiElement, UiLayout>(|key, element, _| {
+                let Some(entity) = world.entity(key) else {
+                    return;
+                };
+                let parent = world.get::<Parent>(key).map(|parent| parent.entity);
+                ids.push(entity);
+                nodes.insert(
+                    entity,
+                    Node {
+                        key,
+                        parent,
+                        anchor_min: element.anchor_min,
+                        anchor_max: element.anchor_max,
+                        offset_min: element.offset_min,
+                        offset_max: element.offset_max,
+                        visible: element.visible,
+                        clip_children: element.clip_children,
+                        state: LayoutState::Pending,
+                    },
+                );
+            });
+            // ID 唯一，原地排序足以固定循环父链的求解起点。
+            ids.sort_unstable();
+            let viewport_rect = [0.0, 0.0, self.viewport[0], self.viewport[1]];
+            let viewport = UiLayout {
+                rect: viewport_rect,
+                clip: viewport_rect,
+                visible: true,
             };
-            let parent = world.get::<Parent>(key).map(|parent| parent.entity);
-            nodes.insert(
-                entity,
-                Node {
-                    key,
-                    parent,
-                    anchor_min: element.anchor_min,
-                    anchor_max: element.anchor_max,
-                    offset_min: element.offset_min,
-                    offset_max: element.offset_max,
-                    visible: element.visible,
-                    clip_children: element.clip_children,
-                },
-            );
-        });
-        if nodes.is_empty() {
-            return;
-        }
-        let mut ids: Vec<EntityId> = nodes.keys().copied().collect();
-        ids.sort();
-        let mut rects: HashMap<EntityId, [f32; 4]> = HashMap::new();
-        let mut clips: HashMap<EntityId, [f32; 4]> = HashMap::new();
-        let mut visibility: HashMap<EntityId, bool> = HashMap::new();
-        let mut visiting = HashSet::new();
-        for id in &ids {
-            resolve(
-                *id,
-                &nodes,
-                viewport,
-                &mut rects,
-                &mut clips,
-                &mut visibility,
-                &mut visiting,
-            );
-        }
-        for id in ids {
-            if let Some(node) = nodes.get(&id) {
-                if let (Some(rect), Some(clip), Some(visible)) =
-                    (rects.get(&id), clips.get(&id), visibility.get(&id))
-                {
+            for &id in ids.iter() {
+                resolve(id, nodes, viewport);
+            }
+            for id in ids {
+                let node = &nodes[id];
+                if let LayoutState::Resolved(result) = node.state {
                     if let Some(layout) = world.get_mut::<UiLayout>(node.key) {
-                        layout.rect = *rect;
-                        layout.clip = *clip;
-                        layout.visible = *visible;
+                        *layout = result;
                     }
                 }
             }
-        }
+        });
     }
 }
 
@@ -294,47 +307,41 @@ fn neighbor(
 
 fn resolve(
     id: EntityId,
-    nodes: &HashMap<EntityId, Node>,
-    viewport: [f32; 2],
-    rects: &mut HashMap<EntityId, [f32; 4]>,
-    clips: &mut HashMap<EntityId, [f32; 4]>,
-    visibility: &mut HashMap<EntityId, bool>,
-    visiting: &mut HashSet<EntityId>,
-) -> Option<([f32; 4], bool)> {
-    if let (Some(rect), Some(visible)) = (rects.get(&id), visibility.get(&id)) {
-        return Some((*rect, *visible));
+    nodes: &mut HashMap<EntityId, Node>,
+    viewport: UiLayout,
+) -> Option<(UiLayout, bool)> {
+    let node = nodes.get_mut(&id)?;
+    let input = *node;
+    match input.state {
+        LayoutState::Resolved(layout) => return Some((layout, input.clip_children)),
+        LayoutState::Visiting => return Some((viewport, input.clip_children)),
+        LayoutState::Pending => node.state = LayoutState::Visiting,
     }
-    let node = nodes.get(&id)?;
-    let viewport_rect = [0.0, 0.0, viewport[0], viewport[1]];
-    if !visiting.insert(id) {
-        return Some((viewport_rect, true));
-    }
-    let (parent_rect, parent_visible) = node
+    let (parent, clip_children) = input
         .parent
-        .and_then(|parent| resolve(parent, nodes, viewport, rects, clips, visibility, visiting))
-        .unwrap_or((viewport_rect, true));
-    let parent_clip = node
-        .parent
-        .and_then(|parent| clips.get(&parent).copied())
-        .unwrap_or(viewport_rect);
-    let clip = match node.parent.and_then(|parent| nodes.get(&parent)) {
-        Some(parent) if parent.clip_children => intersect(parent_clip, parent_rect),
-        _ => parent_clip,
+        .and_then(|parent| resolve(parent, nodes, viewport))
+        .unwrap_or((viewport, false));
+    let parent_rect = parent.rect;
+    let clip = if clip_children {
+        intersect(parent.clip, parent_rect)
+    } else {
+        parent.clip
     };
     let rect = [
-        parent_rect[0] + node.anchor_min[0] * parent_rect[2] + node.offset_min[0],
-        parent_rect[1] + node.anchor_min[1] * parent_rect[3] + node.offset_min[1],
-        (node.anchor_max[0] - node.anchor_min[0]) * parent_rect[2] + node.offset_max[0]
-            - node.offset_min[0],
-        (node.anchor_max[1] - node.anchor_min[1]) * parent_rect[3] + node.offset_max[1]
-            - node.offset_min[1],
+        parent_rect[0] + input.anchor_min[0] * parent_rect[2] + input.offset_min[0],
+        parent_rect[1] + input.anchor_min[1] * parent_rect[3] + input.offset_min[1],
+        (input.anchor_max[0] - input.anchor_min[0]) * parent_rect[2] + input.offset_max[0]
+            - input.offset_min[0],
+        (input.anchor_max[1] - input.anchor_min[1]) * parent_rect[3] + input.offset_max[1]
+            - input.offset_min[1],
     ];
-    let visible = node.visible && parent_visible;
-    visiting.remove(&id);
-    rects.insert(id, rect);
-    clips.insert(id, clip);
-    visibility.insert(id, visible);
-    Some((rect, visible))
+    let layout = UiLayout {
+        rect,
+        clip,
+        visible: input.visible && parent.visible,
+    };
+    nodes.get_mut(&id).unwrap().state = LayoutState::Resolved(layout);
+    Some((layout, input.clip_children))
 }
 
 fn intersect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {

@@ -274,6 +274,152 @@ fn kinematic_parent_chain_reuses_working_storage() {
     );
 }
 
+#[test]
+fn ui_layout_reuses_working_storage() {
+    use xgc_sim::{System, UiLayoutSystem, FIXED_DT};
+    use xgc_world::{Parent, UiElement, UiLayout};
+
+    let mut world = World::new();
+    let hud = world.spawn((
+        UiElement {
+            anchor_min: [0.5, 0.0],
+            anchor_max: [0.5, 0.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    let hud_id = world.entity(hud).unwrap();
+    let panel = world.spawn((
+        Parent { entity: hud_id },
+        UiElement {
+            offset_min: [32.0, 16.0],
+            offset_max: [416.0, 144.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    let panel_id = world.entity(panel).unwrap();
+    // 让 HUD 的元素数超过标准库稳定排序的栈缓冲，覆盖大型布局的稳态开销。
+    let tile = (0..1024)
+        .map(|index| {
+            let x = (index % 32) as f32 * 12.0;
+            let y = (index / 32) as f32 * 4.0;
+            world.spawn((
+                Parent { entity: panel_id },
+                UiElement {
+                    offset_min: [x, y],
+                    offset_max: [x + 8.0, y + 8.0],
+                    ..UiElement::default()
+                },
+                UiLayout::default(),
+            ))
+        })
+        .last()
+        .unwrap();
+
+    let mut system = UiLayoutSystem::default();
+    let mut step = |frame: u32| {
+        let slide = (frame % 8) as f32 * 4.0;
+        let visible = frame % 2 == 0;
+        let element = world.get_mut::<UiElement>(hud).unwrap();
+        element.offset_min = [slide, 0.0];
+        element.offset_max = [slide + 320.0, 240.0];
+        element.visible = visible;
+        system.run(&mut world, FIXED_DT);
+        // 末端元素随 HUD 移动，并落在两级裁剪后的矩形之外。
+        let hud_left = 640.0 + slide;
+        let layout = world.get::<UiLayout>(tile).unwrap();
+        assert_eq!(layout.rect, [hud_left + 404.0, 140.0, 8.0, 8.0]);
+        assert_eq!(layout.clip, [hud_left + 32.0, 16.0, 288.0, 128.0]);
+        assert_eq!(layout.visible, visible);
+    };
+    for frame in 0..8 {
+        step(frame);
+    }
+
+    let start = Instant::now();
+    reset_counter();
+    for frame in 8..68 {
+        step(frame);
+    }
+    let (allocations, bytes) = snapshot().expect("量测线程的计数器");
+    eprintln!(
+        "UI layout: 60 帧 / {} 个元素 / {allocations} 次分配 / {bytes} 字节 / {:?}",
+        world.len(),
+        start.elapsed()
+    );
+    assert_eq!(allocations, 0, "UI 布局稳态不应分配：{bytes} 字节");
+}
+
+#[test]
+fn ui_layout_reuses_buffers_across_worlds() {
+    use xgc_sim::{System, UiLayoutSystem, FIXED_DT};
+    use xgc_world::{Parent, UiElement, UiLayout};
+
+    let mut world = World::new();
+    let spare = world.spawn((Parent::default(), UiElement::default(), UiLayout::default()));
+    let first = world.spawn((
+        Parent::default(),
+        UiElement {
+            offset_min: [10.0, 0.0],
+            offset_max: [50.0, 40.0],
+            visible: false,
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    let first_id = world.entity(first).unwrap();
+    let second = world.spawn((
+        Parent { entity: first_id },
+        UiElement {
+            offset_min: [20.0, 0.0],
+            offset_max: [80.0, 50.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    world.get_mut::<Parent>(first).unwrap().entity = world.entity(second).unwrap();
+    // swap_remove 将较大的 ID 挪到首行，循环仍应从较小的 ID 开始求解。
+    assert!(world.despawn(spare));
+    UiLayoutSystem {
+        viewport: [200.0, 100.0],
+    }
+    .run(&mut world, FIXED_DT);
+    let first_layout = world.get::<UiLayout>(first).unwrap();
+    assert_eq!(first_layout.rect, [30.0, 0.0, 40.0, 40.0]);
+    assert_eq!(first_layout.clip, [20.0, 0.0, 60.0, 50.0]);
+    assert!(!first_layout.visible);
+    let second_layout = world.get::<UiLayout>(second).unwrap();
+    assert_eq!(second_layout.rect, [20.0, 0.0, 60.0, 50.0]);
+    assert_eq!(second_layout.clip, [0.0, 0.0, 200.0, 100.0]);
+    assert!(second_layout.visible);
+
+    let mut other = World::new();
+    let child = other.spawn((
+        Parent { entity: first_id },
+        UiElement {
+            anchor_min: [1.0, 0.0],
+            anchor_max: [1.0, 0.0],
+            offset_min: [-45.0, 10.0],
+            offset_max: [-25.0, 20.0],
+            ..UiElement::default()
+        },
+        UiLayout::default(),
+    ));
+    reset_counter();
+    UiLayoutSystem {
+        viewport: [300.0, 200.0],
+    }
+    .run(&mut other, FIXED_DT);
+    let (allocations, _) = snapshot().expect("量测线程的计数器");
+    assert_eq!(allocations, 0, "同一线程换世界后应继续复用布局缓冲");
+    // 第二个世界缺少该父节点，必须按自己的视口求解。
+    let layout = other.get::<UiLayout>(child).unwrap();
+    assert_eq!(layout.rect, [255.0, 10.0, 20.0, 10.0]);
+    assert_eq!(layout.clip, [0.0, 0.0, 300.0, 200.0]);
+    assert!(layout.visible);
+}
+
 /// 默认忽略：帧耗时只在 `--release` 下有意义。
 #[test]
 #[ignore = "计时只在 release 下有意义：cargo test -p xgc-sim --release --test steady_state -- --ignored --nocapture"]
