@@ -2,9 +2,10 @@
 //!
 //! 脏场景与 Play 期间一律拒绝：静默丢改动救不回来，Play 世界和编辑世界是两份数据。
 
+use xgc_store::load_world_with_bytes;
 use xgc_world::World;
 
-use crate::EditorState;
+use crate::{EditorState, SceneFile};
 
 impl EditorState {
     /// 项目登记的全部场景；单场景打开时为空。
@@ -34,18 +35,17 @@ impl EditorState {
             .project
             .as_ref()
             .ok_or_else(|| "当前不是项目，无法切换场景".to_string())?;
-        let data = session
-            .load_scene(scene)
-            .map_err(|err| format!("读取场景失败：{err}"))?;
         let path = session
             .scene_path(scene)
-            .map_err(|err| format!("场景路径不合法：{err}"))?;
+            .map_err(|err| format!("读取场景失败：{err}"))?;
+        let (data, bytes) =
+            load_world_with_bytes(&path).map_err(|err| format!("读取场景失败：{err}"))?;
         let mut world = World::new();
         world
             .restore_world_data(&data)
             .map_err(|err| format!("恢复世界失败：{err}"))?;
         self.world = world;
-        self.path = Some(path);
+        self.file = Some(SceneFile { path, bytes });
         self.scene = Some(scene.to_string());
         self.selected = None;
         self.undo.clear();

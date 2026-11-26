@@ -1,10 +1,12 @@
-//! 编辑器从原生预制体文件实例化，按选中实体的来源还原实例。
+//! 编辑器从原生预制体文件实例化，按选中实体的来源还原或写回。
 
 use std::path::{Path, PathBuf};
 
 use xgc_base::{path::normalize_project_relative, EntityId};
-use xgc_store::load_prefab;
-use xgc_world::{instantiate_prefab, revert_prefab, Component, Parent, PrefabInstance};
+use xgc_store::{load_prefab, load_prefab_with_bytes, save_prefab_if_unchanged};
+use xgc_world::{
+    apply_prefab_values, instantiate_prefab, revert_prefab, Component, Parent, PrefabInstance,
+};
 
 use crate::{AssetKind, EditorState};
 
@@ -66,6 +68,47 @@ impl EditorState {
         if self.is_playing() {
             return Err("Play 期间不能 Revert 预制体".to_string());
         }
+        let (selected, path) = self.selected_prefab_path()?;
+        let data = load_prefab(&path).map_err(|err| format!("读取预制体失败：{err}"))?;
+        let before = self.world.world_data();
+        let mapping = revert_prefab(&mut self.world, &data, selected)?;
+        self.record_undo(before);
+        if !mapping.iter().any(|(_, instance)| *instance == selected) {
+            self.selected = mapping.iter().find_map(|(_, instance)| {
+                self.prefab_instance(*instance)
+                    .is_some_and(|meta| meta.root)
+                    .then_some(*instance)
+            });
+        }
+        self.dirty = true;
+        Ok(mapping.len())
+    }
+
+    pub(crate) fn can_apply_prefab(&self) -> bool {
+        self.file.is_some() && self.can_revert_prefab()
+    }
+
+    /// 把已有实体与组件的值写回来源预制体，场景编辑历史仍由本会话持有。
+    pub fn apply_selected_prefab(&self) -> Result<usize, String> {
+        if self.is_playing() {
+            return Err("Play 期间不能 Apply 预制体".into());
+        }
+        let file = self.file.as_ref().ok_or("请先保存场景再 Apply 预制体")?;
+        let (selected, path) = self.selected_prefab_path()?;
+        let (asset, expected) =
+            load_prefab_with_bytes(&path).map_err(|err| format!("读取预制体失败：{err}"))?;
+        let candidate = apply_prefab_values(&self.world, &asset, selected)?;
+        let current =
+            std::fs::read(&file.path).map_err(|err| format!("读取当前场景失败：{err}"))?;
+        if current != file.bytes {
+            return Err("当前场景已被外部修改；请重新打开后再 Apply".into());
+        }
+        save_prefab_if_unchanged(&path, &candidate, &expected)
+            .map_err(|err| format!("写回预制体失败：{err}"))?;
+        Ok(candidate.entities.len())
+    }
+
+    fn selected_prefab_path(&self) -> Result<(EntityId, PathBuf), String> {
         let selected = self.selected.ok_or_else(|| "没有选中实体".to_string())?;
         let source = &self
             .prefab_instance(selected)
@@ -86,19 +129,7 @@ impl EditorState {
             }
             None => canonical_prefab_path(Path::new(source))?,
         };
-        let data = load_prefab(&path).map_err(|err| format!("读取预制体失败：{err}"))?;
-        let before = self.world.world_data();
-        let mapping = revert_prefab(&mut self.world, &data, selected)?;
-        self.record_undo(before);
-        if !mapping.iter().any(|(_, instance)| *instance == selected) {
-            self.selected = mapping.iter().find_map(|(_, instance)| {
-                self.prefab_instance(*instance)
-                    .is_some_and(|meta| meta.root)
-                    .then_some(*instance)
-            });
-        }
-        self.dirty = true;
-        Ok(mapping.len())
+        Ok((selected, path))
     }
 
     fn prefab_instance(&self, entity: EntityId) -> Option<&PrefabInstance> {

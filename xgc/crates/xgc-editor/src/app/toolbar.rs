@@ -138,6 +138,15 @@ impl EditorApp {
             }
         }
         if ui
+            .add_enabled(self.state.can_apply_prefab(), egui::Button::new("Apply"))
+            .clicked()
+        {
+            self.status = Some(match self.state.apply_selected_prefab() {
+                Ok(count) => format!("已将 {count} 个实体的值写回预制体"),
+                Err(err) => err,
+            });
+        }
+        if ui
             .add_enabled(self.state.can_revert_prefab(), egui::Button::new("Revert"))
             .clicked()
         {

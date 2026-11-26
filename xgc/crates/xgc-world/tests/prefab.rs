@@ -1,11 +1,12 @@
-//! 还原范围由实例根和同源父链共同决定。
+//! 预制体值写回和还原都按实例根与来源身份定位。
 
 use std::f32::consts::FRAC_1_SQRT_2;
 
 use xgc_base::EntityId;
 use xgc_world::{
-    instantiate_prefab, revert_prefab, Command, Component, ComponentData, GlobalTransform, Name,
-    Parent, PrefabInstance, Transform, Value, World, WorldData,
+    apply_prefab_values, instantiate_prefab, revert_prefab, Command, Component, ComponentData,
+    GlobalTransform, Name, Parent, PluginComponent, PrefabInstance, Script, Transform, Value,
+    World, WorldData,
 };
 
 const SOURCE: &str = "Prefabs/fixture.json";
@@ -37,6 +38,157 @@ fn attach(world: &mut World, entity: EntityId, parent: EntityId) {
         },
     }]);
     world.apply(&plan).unwrap();
+}
+
+#[test]
+fn apply_values_preserves_source_identity_and_asset_space() {
+    let mut prefab = World::new();
+    let placement = Transform {
+        position: [4.0, 0.0, 0.0],
+        ..Transform::default()
+    };
+    let asset_root = prefab.spawn((
+        Name {
+            value: "root".into(),
+        },
+        placement,
+        GlobalTransform::from_local(&placement),
+    ));
+    let asset_root = prefab.entity(asset_root).unwrap();
+    let hinge = Transform {
+        position: [0.0, 2.0, 0.0],
+        ..Transform::default()
+    };
+    let asset_hinge = prefab.spawn((
+        hinge,
+        GlobalTransform::default(),
+        Parent { entity: asset_root },
+    ));
+    let asset_hinge = prefab.entity(asset_hinge).unwrap();
+    let asset_child = prefab.spawn((
+        Transform::default(),
+        GlobalTransform::default(),
+        Parent { entity: asset_root },
+    ));
+    let asset_child = prefab.entity(asset_child).unwrap();
+    let mut asset = prefab.world_data();
+    asset.next_id += 10;
+    asset.entities.reverse();
+    for entity in &mut asset.entities {
+        entity.components.reverse();
+    }
+
+    let mut world = World::new();
+    let outside = world.spawn((Transform::default(),));
+    let outside = world.entity(outside).unwrap();
+    let instance = instantiate_prefab(&mut world, &asset, Some(SOURCE)).unwrap();
+    let (_, root) = instance[0];
+    let (_, hinge) = instance[1];
+    let (_, child) = instance[2];
+    attach(&mut world, root, outside);
+    let root_key = world.key(root).unwrap();
+    let child_key = world.key(child).unwrap();
+    world.get_mut::<Name>(root_key).unwrap().value = "changed".into();
+    world.get_mut::<Transform>(root_key).unwrap().position = [10.0, 20.0, 30.0];
+    world.get_mut::<GlobalTransform>(root_key).unwrap().position = [100.0; 3];
+    world.get_mut::<Parent>(child_key).unwrap().entity = hinge;
+    world.get_mut::<Transform>(child_key).unwrap().position = [1.0, 3.0, 0.0];
+    world
+        .get_mut::<GlobalTransform>(child_key)
+        .unwrap()
+        .position = [200.0; 3];
+    let before = world.world_data();
+
+    let applied = apply_prefab_values(&world, &asset, child).unwrap();
+
+    assert_eq!(world.world_data(), before);
+    assert_eq!(applied.revision, asset.revision);
+    assert_eq!(applied.next_id, asset.next_id);
+    for (asset, applied) in asset.entities.iter().zip(&applied.entities) {
+        assert_eq!(applied.id, asset.id);
+        assert_eq!(applied.revision, asset.revision);
+        assert!(applied
+            .components
+            .iter()
+            .map(|data| data.component)
+            .eq(asset.components.iter().map(|data| data.component)));
+    }
+    prefab.restore_world_data(&applied).unwrap();
+    let root_key = prefab.key(asset_root).unwrap();
+    let child_key = prefab.key(asset_child).unwrap();
+    assert_eq!(prefab.get::<Name>(root_key).unwrap().value, "changed");
+    assert_eq!(prefab.get::<Transform>(root_key), Some(&placement));
+    assert_eq!(
+        prefab.get::<GlobalTransform>(root_key).unwrap().position,
+        [4.0, 0.0, 0.0]
+    );
+    assert!(prefab.get::<Parent>(root_key).is_none());
+    assert_eq!(prefab.get::<Parent>(child_key).unwrap().entity, asset_hinge);
+    assert_eq!(
+        prefab.get::<Transform>(child_key).unwrap().position,
+        [1.0, 3.0, 0.0]
+    );
+    assert_eq!(
+        prefab.get::<GlobalTransform>(child_key).unwrap().position,
+        [5.0, 5.0, 0.0]
+    );
+}
+
+#[test]
+fn apply_values_rejects_structure_and_bad_asset_identity() {
+    let mut prefab = World::new();
+    let asset_root = prefab.spawn((
+        Transform::default(),
+        Script {
+            path: "Scripts/initial.lua".into(),
+        },
+        PluginComponent {
+            registered_name: "initial".into(),
+            fields: "before".into(),
+        },
+    ));
+    let asset_root = prefab.entity(asset_root).unwrap();
+    let asset = prefab.world_data();
+    let mut world = World::new();
+    let instance = instantiate_prefab(&mut world, &asset, Some(SOURCE)).unwrap();
+    let root = instance[0].1;
+    let root_key = world.key(root).unwrap();
+    let mut duplicate = asset.clone();
+    duplicate.entities.push(asset.entities[0].clone());
+    assert!(apply_prefab_values(&world, &duplicate, root).is_err());
+
+    world.get_mut::<PluginComponent>(root_key).unwrap().fields = "after".into();
+    let changed = apply_prefab_values(&world, &asset, root).unwrap();
+    prefab.restore_world_data(&changed).unwrap();
+    assert_eq!(
+        prefab
+            .get::<PluginComponent>(prefab.key(asset_root).unwrap())
+            .unwrap()
+            .fields,
+        "after"
+    );
+    world
+        .get_mut::<PluginComponent>(root_key)
+        .unwrap()
+        .registered_name = "different".into();
+    assert!(apply_prefab_values(&world, &asset, root).is_err());
+    world
+        .get_mut::<PluginComponent>(root_key)
+        .unwrap()
+        .registered_name = "initial".into();
+    world.get_mut::<Script>(root_key).unwrap().path = "Scripts/different.lua".into();
+    assert!(apply_prefab_values(&world, &asset, root).is_err());
+    world.get_mut::<Script>(root_key).unwrap().path = "Scripts/initial.lua".into();
+
+    let extra = world.spawn((Parent { entity: root },));
+    assert!(apply_prefab_values(&world, &asset, root).is_err());
+    world.despawn(extra);
+    let plan = world.plan(vec![Command::RemoveComponent {
+        entity: root,
+        component: Script::ID,
+    }]);
+    world.apply(&plan).unwrap();
+    assert!(apply_prefab_values(&world, &asset, root).is_err());
 }
 
 #[test]

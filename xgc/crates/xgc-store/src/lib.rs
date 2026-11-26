@@ -76,41 +76,73 @@ struct Envelope<T> {
 }
 
 pub fn save_world(path: &Path, data: &WorldData) -> Result<()> {
+    save_world_with_bytes(path, data).map(drop)
+}
+
+/// 返回同一次保存的原文，供编辑器建立磁盘基准。
+pub fn save_world_with_bytes(path: &Path, data: &WorldData) -> Result<Vec<u8>> {
     save(path, "world", data)
 }
 
 pub fn load_world(path: &Path) -> Result<WorldData> {
-    load(path, "world")
+    load_world_with_bytes(path).map(|(data, _)| data)
+}
+
+pub fn load_world_with_bytes(path: &Path) -> Result<(WorldData, Vec<u8>)> {
+    load_with_bytes(path, "world")
 }
 
 pub fn save_prefab(path: &Path, data: &WorldData) -> Result<()> {
-    save(path, "prefab", data)
+    save(path, "prefab", data).map(drop)
+}
+
+/// 用加载时的原文检查提交前的资产版本，再走同一暂存替换入口。
+/// 跨进程的写入仍可发生在检查与替换之间。
+pub fn save_prefab_if_unchanged(path: &Path, data: &WorldData, expected: &[u8]) -> Result<()> {
+    let bytes = encode("prefab", data)?;
+    // serde_json 会把非有限浮点写成 null；必须在替换前确认写出的资产仍能加载。
+    decode::<WorldData>(&bytes, "prefab")?;
+    write_atomic_checked(path, &bytes, Some(expected))
 }
 
 pub fn load_prefab(path: &Path) -> Result<WorldData> {
-    load(path, "prefab")
+    load_prefab_with_bytes(path).map(|(data, _)| data)
+}
+
+pub fn load_prefab_with_bytes(path: &Path) -> Result<(WorldData, Vec<u8>)> {
+    load_with_bytes(path, "prefab")
 }
 
 pub fn save_journal(path: &Path, journal: &Journal) -> Result<()> {
-    save(path, "journal", journal)
+    save(path, "journal", journal).map(drop)
 }
 
 pub fn load_journal(path: &Path) -> Result<Journal> {
-    load(path, "journal")
+    load_with_bytes(path, "journal").map(|(data, _)| data)
 }
 
-fn save<T: Serialize>(path: &Path, kind: &str, payload: &T) -> Result<()> {
-    let text = serde_json::to_string_pretty(&Envelope {
+fn save<T: Serialize>(path: &Path, kind: &str, payload: &T) -> Result<Vec<u8>> {
+    let bytes = encode(kind, payload)?;
+    write_atomic(path, &bytes)?;
+    Ok(bytes)
+}
+
+fn encode<T: Serialize>(kind: &str, payload: &T) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec_pretty(&Envelope {
         format_version: FORMAT_VERSION,
         kind: kind.to_string(),
         payload,
-    })?;
-    write_atomic(path, text.as_bytes())
+    })?)
 }
 
-fn load<T: DeserializeOwned>(path: &Path, expected_kind: &str) -> Result<T> {
-    let text = fs::read_to_string(path)?;
-    let envelope: Envelope<T> = serde_json::from_str(&text)?;
+fn load_with_bytes<T: DeserializeOwned>(path: &Path, expected_kind: &str) -> Result<(T, Vec<u8>)> {
+    let bytes = fs::read_to_string(path)?.into_bytes();
+    let data = decode(&bytes, expected_kind)?;
+    Ok((data, bytes))
+}
+
+fn decode<T: DeserializeOwned>(bytes: &[u8], expected_kind: &str) -> Result<T> {
+    let envelope: Envelope<T> = serde_json::from_slice(bytes)?;
     if envelope.format_version != FORMAT_VERSION {
         return Err(StoreError::Format(format!(
             "格式版本 {} 不受支持（当前 {FORMAT_VERSION}）",
@@ -127,10 +159,17 @@ fn load<T: DeserializeOwned>(path: &Path, expected_kind: &str) -> Result<T> {
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Ok(existing) = fs::read(path) {
-        if existing == bytes {
+    write_atomic_checked(path, bytes, None)
+}
+
+fn write_atomic_checked(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<()> {
+    if let Some(expected) = expected {
+        check_prefab_bytes(path, expected)?;
+        if expected == bytes {
             return Ok(());
         }
+    } else if fs::read(path).is_ok_and(|existing| existing == bytes) {
+        return Ok(());
     }
 
     if let Some(parent) = path.parent() {
@@ -141,32 +180,47 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
     let temp = temp_path(path);
     let mut file = File::create(&temp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
 
-    match fs::rename(&temp, path) {
-        Ok(()) => Ok(()),
-        Err(err)
-            if err.kind() == std::io::ErrorKind::AlreadyExists
-                || err.kind() == std::io::ErrorKind::PermissionDenied =>
-        {
-            match fs::remove_file(path) {
-                Ok(()) => {}
-                Err(remove_err) if remove_err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(remove_err) => {
-                    let _ = fs::remove_file(&temp);
-                    return Err(remove_err.into());
+        if let Some(expected) = expected {
+            check_prefab_bytes(path, expected)?;
+        }
+        match fs::rename(&temp, path) {
+            // Apply 的条件替换失败时，旧资产仍须完整留在原处。
+            Err(err)
+                if expected.is_none()
+                    && matches!(
+                        err.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                    ) =>
+            {
+                match fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err.into()),
                 }
+                fs::rename(&temp, path)?;
             }
-            fs::rename(&temp, path)?;
-            Ok(())
+            result => result?,
         }
-        Err(err) => {
-            let _ = fs::remove_file(&temp);
-            Err(err.into())
-        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
+    result
+}
+
+fn check_prefab_bytes(path: &Path, expected: &[u8]) -> Result<()> {
+    if fs::read(path)? != expected {
+        return Err(StoreError::Format(
+            "预制体已被外部修改；请重试 Apply".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn temp_path(path: &Path) -> PathBuf {
