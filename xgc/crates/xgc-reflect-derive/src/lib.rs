@@ -57,6 +57,10 @@ fn component(input: &DeriveInput) -> syn::Result<Tokens> {
         let Field { ident, name, ty, .. } = field;
         quote_spanned!(ty.span()=> #name => Some(<#ty as ::xgc_reflect::ReflectValue>::to_value(&self.#ident)),)
     });
+    let hashes = fields.iter().map(|field| {
+        let Field { ident, name, ty, .. } = field;
+        quote_spanned!(ty.span()=> #name => <#ty as ::xgc_reflect::ReflectValue>::hash_into(&self.#ident, hash),)
+    });
     let component_name = &name;
     let writes = fields.iter().map(|field| {
         let Field {
@@ -99,6 +103,10 @@ fn component(input: &DeriveInput) -> syn::Result<Tokens> {
 
             fn get_field(&self, field: &str) -> Option<::xgc_reflect::Value> {
                 match field { #(#reads)* _ => None }
+            }
+
+            fn hash_field_into(&self, field: &str, hash: &mut u64) {
+                match field { #(#hashes)* _ => () }
             }
 
             fn set_field(&mut self, field: &str, value: &::xgc_reflect::Value) -> Result<(), String> {

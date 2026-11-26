@@ -16,6 +16,11 @@ pub trait ReflectValue: Sized {
     fn to_value(&self) -> Value;
     fn from_value(value: &Value) -> Result<Self, String>;
 
+    /// 与 `to_value().hash_into(hash)` 同序，可直接读取字段以免物化拥有型值。
+    fn hash_into(&self, hash: &mut u64) {
+        self.to_value().hash_into(hash);
+    }
+
     fn descriptor(name: &'static str, default: &Self) -> FieldDescriptor {
         FieldDescriptor::new(name, Self::field_type(), default.to_value())
     }
@@ -56,9 +61,6 @@ scalar!(f32, F32, F64, |v: &f32| f64::from(*v), |v: &f64| {
 scalar!(f64, F64, F64, |v: &f64| *v, |v: &f64| v
     .is_finite()
     .then_some(*v));
-scalar!(String, String, String, String::clone, |v: &String| Some(
-    v.clone()
-));
 scalar!(
     EntityId,
     Entity,
@@ -66,6 +68,27 @@ scalar!(
     |v: &EntityId| v.raw(),
     |v: &u64| { Some(EntityId::from_raw(*v)) }
 );
+
+impl ReflectValue for String {
+    fn field_type() -> FieldType {
+        FieldType::String
+    }
+
+    fn to_value(&self) -> Value {
+        Value::String(self.clone())
+    }
+
+    fn from_value(value: &Value) -> Result<Self, String> {
+        value
+            .as_string()
+            .map(str::to_owned)
+            .ok_or_else(|| type_error("string", value))
+    }
+
+    fn hash_into(&self, hash: &mut u64) {
+        Value::hash_string_into(self, hash);
+    }
+}
 
 impl<T: ReflectValue + Default> ReflectValue for Vec<T> {
     fn field_type() -> FieldType {

@@ -65,6 +65,14 @@ impl PhysicsBody {
     pub fn is_dynamic(&self) -> bool {
         self.kind() == BodyKind::Dynamic
     }
+
+    fn string_field(&self, field: &str) -> Option<&str> {
+        match field {
+            "kind" => Some(&self.kind),
+            "shape" => Some(&self.shape),
+            _ => None,
+        }
+    }
 }
 
 impl Component for PhysicsBody {
@@ -114,9 +122,10 @@ impl Component for PhysicsBody {
     }
 
     fn get_field(&self, field: &str) -> Option<Value> {
+        if let Some(text) = self.string_field(field) {
+            return Some(Value::String(text.to_owned()));
+        }
         match field {
-            "kind" => Some(Value::String(self.kind.clone())),
-            "shape" => Some(Value::String(self.shape.clone())),
             "half_extents" => Some(Value::Vec3([
                 f64::from(self.half_extents[0]),
                 f64::from(self.half_extents[1]),
@@ -130,6 +139,14 @@ impl Component for PhysicsBody {
             "gravity_scale" => Some(Value::F64(f64::from(self.gravity_scale))),
             "is_sensor" => Some(Value::Bool(self.is_sensor)),
             _ => None,
+        }
+    }
+
+    fn hash_field_into(&self, field: &str, hash: &mut u64) {
+        if let Some(text) = self.string_field(field) {
+            Value::hash_string_into(text, hash);
+        } else if let Some(value) = self.get_field(field) {
+            value.hash_into(hash);
         }
     }
 

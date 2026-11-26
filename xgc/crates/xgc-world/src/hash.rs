@@ -49,7 +49,8 @@ impl World {
                     .filter(|meta| meta.alive)
                     .map(|meta| (meta.id.raw(), meta.archetype, meta.row)),
             );
-            entities.sort_by_key(|(id, _, _)| *id);
+            // 实体 ID 唯一，无需为相同键保序或申请稳定排序的临时缓冲。
+            entities.sort_unstable_by_key(|(id, _, _)| *id);
 
             for &(id, archetype, row) in entities.iter() {
                 mix(&mut hash, id);
@@ -63,9 +64,7 @@ impl World {
                     };
                     for name in names {
                         mix_str(&mut hash, name);
-                        if let Some(value) = column.get_field(row as usize, name) {
-                            value.hash_into(&mut hash);
-                        }
+                        column.hash_field_into(row as usize, name, &mut hash);
                     }
                 }
             }

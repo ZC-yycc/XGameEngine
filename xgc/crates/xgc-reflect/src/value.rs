@@ -119,22 +119,20 @@ impl Value {
         }
     }
 
+    /// 混入字符串字段的 UTF-8 字节，借用时也可直接复用同一算法。
+    pub fn hash_string_into(value: &str, hash: &mut u64) {
+        for byte in value.bytes() {
+            mix(hash, u64::from(byte));
+        }
+    }
+
     /// 状态哈希用的稳定混合；只求同输入同输出，不做密码学。
     pub fn hash_into(&self, hash: &mut u64) {
-        fn mix(hash: &mut u64, value: u64) {
-            *hash ^= value;
-            *hash = hash.wrapping_mul(0x100000001b3);
-        }
-
         match self {
             Self::Bool(value) => mix(hash, u64::from(*value)),
             Self::I64(value) => mix(hash, *value as u64),
             Self::F64(value) => mix(hash, value.to_bits()),
-            Self::String(value) => {
-                for byte in value.bytes() {
-                    mix(hash, u64::from(byte));
-                }
-            }
+            Self::String(value) => Self::hash_string_into(value, hash),
             Self::Vec2(value) => {
                 mix(hash, value[0].to_bits());
                 mix(hash, value[1].to_bits());
@@ -194,6 +192,11 @@ impl Value {
             value.hash_into(hash);
         }
     }
+}
+
+fn mix(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(0x100000001b3);
 }
 
 pub(super) fn struct_fits<F>(

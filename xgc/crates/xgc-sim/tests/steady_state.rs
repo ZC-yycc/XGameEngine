@@ -128,47 +128,55 @@ fn steady_state_frames_stay_within_the_allocation_budget() {
         "steady-state: 60 帧 {allocations} 次分配 / {bytes} 字节，实体 {}",
         simulation.world().len()
     );
-    // 预算按"每实体 + 固定预算"给：字符串字段经 `Value` 反射读取时每实体克隆一次
-    // 是当前反射模型的固有成本（见 STATUS 的未闭环），真正的回归是"每实体上千次"
-    // 这种数量级；上限取 实体数 + 64 在测得的 230 次/帧附近留了余量，又把
-    // `state_hash` 里按实体重排组件 / 字段的那类分配挡在外面。
-    let entities = simulation.world().len() as u64;
-    let budget = 60 * (entities + 64);
+    // 这个固定场景实测约 23 次/帧。给刚体后端和 trace 扩容留余量，同时让
+    // 每实体分配重新出现时越过门禁。
+    let budget = 60 * 32;
     assert!(
         allocations <= budget,
-        "稳态帧分配必须随实体数线性：60 帧分配了 {allocations} 次（{bytes} 字节），预算 {budget} 次"
+        "稳态帧分配超预算：60 帧分配了 {allocations} 次（{bytes} 字节），预算 {budget} 次"
     );
 }
 
-/// `state_hash` 的排序 / 字段布局必须一次性算完：数值型组件世界里连一次分配都不许有。
-/// 这条把 `hash.rs` 里"每帧逐实体收集并排序组件 ID / 每次调用 `field_names()`"的
-/// 回归挡在外面（那种写法 60 帧会分配上千次）。
 #[test]
-fn hashing_numeric_components_does_not_allocate() {
-    reset_counter();
-    let mut world = World::default();
-    for index in 0..200 {
-        let position = index as f32 * 0.5;
-        world.spawn((
-            Transform {
-                position: [position, 0.0, 0.0],
-                ..Transform::default()
-            },
-            Velocity::default(),
-        ));
-    }
-    let _ = world.state_hash();
+fn hashing_numeric_and_string_fields_does_not_allocate() {
+    let world = demo_world();
+    const EXPECTED_HASH: u64 = 0xcda5_ee4b_28a9_f49e;
+    assert_eq!(world.state_hash(), EXPECTED_HASH);
     reset_counter();
     let mut hash = 0u64;
     for _ in 0..60 {
-        hash = hash.wrapping_add(world.state_hash());
+        hash = hash.wrapping_add(std::hint::black_box(&world).state_hash());
     }
     let (allocations, _) = snapshot().expect("量测线程的计数器");
-    assert!(hash != 0);
+    assert_eq!(hash, EXPECTED_HASH.wrapping_mul(60));
     assert_eq!(
         allocations, 0,
-        "数值型组件的 state_hash 必须零分配：60 次共分配 {allocations} 次"
+        "含名字和刚体的世界哈希必须零分配：60 次共分配 {allocations} 次"
     );
+}
+
+#[test]
+fn hashing_many_entities_reuses_the_sort_buffer() {
+    let mut world = World::new();
+    let removed: Vec<_> = (0..5_000)
+        .map(|_| world.spawn((Transform::default(),)))
+        .collect();
+    for _ in 0..5_000 {
+        world.spawn((Transform::default(),));
+    }
+    for key in removed {
+        assert!(world.despawn(key));
+    }
+    // 复用句柄槽会让实体 ID 的遍历顺序与排序后的顺序不同。
+    for _ in 0..5_000 {
+        world.spawn((Transform::default(),));
+    }
+    let expected = world.state_hash();
+    reset_counter();
+    let actual = std::hint::black_box(&world).state_hash();
+    let (allocations, _) = snapshot().expect("量测线程的计数器");
+    assert_eq!(actual, expected);
+    assert_eq!(allocations, 0, "大世界哈希的排序不能分配临时缓冲");
 }
 
 /// 默认忽略：帧耗时只在 `--release` 下有意义。

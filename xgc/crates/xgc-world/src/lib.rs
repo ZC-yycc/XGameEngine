@@ -85,6 +85,7 @@ pub trait Column: Any + Send + Sync {
     }
     fn swap_remove(&mut self, index: usize);
     fn get_field(&self, row: usize, field: &str) -> Option<Value>;
+    fn hash_field_into(&self, row: usize, field: &str, hash: &mut u64);
     fn set_field(&mut self, row: usize, field: &str, value: &Value) -> Result<(), String>;
     fn validate_field(&self, row: usize, field: &str, value: &Value) -> Result<(), String>;
     fn field_names(&self) -> Vec<&'static str>;
@@ -114,6 +115,12 @@ impl<T: Component> Column for Vec<T> {
 
     fn get_field(&self, row: usize, field: &str) -> Option<Value> {
         self.get(row)?.get_field(field)
+    }
+
+    fn hash_field_into(&self, row: usize, field: &str, hash: &mut u64) {
+        if let Some(item) = self.get(row) {
+            item.hash_field_into(field, hash);
+        }
     }
 
     fn set_field(&mut self, row: usize, field: &str, value: &Value) -> Result<(), String> {

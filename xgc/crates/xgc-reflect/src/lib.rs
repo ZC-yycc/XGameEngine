@@ -61,6 +61,13 @@ pub trait Component: Any + Clone + Send + Sync {
         None
     }
 
+    /// 混入字段的值，等价于读取该字段后对 `Value` 哈希。字段名由调用方混入。
+    fn hash_field_into(&self, field: &str, hash: &mut u64) {
+        if let Some(value) = self.get_field(field) {
+            value.hash_into(hash);
+        }
+    }
+
     /// 动态写字段；实现方负责类型校验，错误必须是给人看的原因。
     fn set_field(&mut self, _field: &str, _value: &Value) -> Result<(), String> {
         Err(format!("{} 不支持字段写入", Self::NAME))
