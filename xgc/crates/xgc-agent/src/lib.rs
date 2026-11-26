@@ -17,6 +17,7 @@ mod mcp;
 mod methods;
 mod query;
 mod schemas;
+mod script_check;
 mod snapshot;
 
 #[cfg(test)]

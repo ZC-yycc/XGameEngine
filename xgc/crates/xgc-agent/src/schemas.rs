@@ -3,9 +3,23 @@
 use serde_json::{json, Value as Json};
 
 use crate::query::{QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT};
+use crate::script_check::INLINE_NAME;
 
 pub(super) fn no_params() -> Json {
     json!({"type": "object", "properties": {}, "description": "无需参数。"})
+}
+
+pub(super) fn script_check() -> Json {
+    object(
+        json!({
+            "source": {"type": "string", "description": "待编译的 Lua 文本。"},
+            "name": {
+                "type": ["string", "null"], "default": INLINE_NAME,
+                "description": "诊断显示名。缺少或为 null 时用缺省名。"
+            }
+        }),
+        &["source"],
+    )
 }
 
 pub(super) fn query() -> Json {

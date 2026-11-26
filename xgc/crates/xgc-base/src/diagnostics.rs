@@ -25,6 +25,8 @@ pub const WORLD_UNKNOWN_TYPE: &str = "WORLD.UNKNOWN_TYPE";
 pub const WORLD_TYPE_MISMATCH: &str = "WORLD.TYPE_MISMATCH";
 pub const WORLD_RANGE: &str = "WORLD.RANGE";
 
+pub const SCRIPT_COMPILE: &str = "SCRIPT.COMPILE";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiagnosticCode {
     pub code: &'static str,
@@ -123,6 +125,10 @@ pub const CATALOG: &[DiagnosticCode] = &[
     DiagnosticCode {
         code: WORLD_RANGE,
         summary: "字段值超出允许范围",
+    },
+    DiagnosticCode {
+        code: SCRIPT_COMPILE,
+        summary: "Lua 源码编译失败",
     },
 ];
 

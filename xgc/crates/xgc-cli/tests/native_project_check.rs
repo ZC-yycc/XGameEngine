@@ -394,6 +394,49 @@ fn reports_bad_children_assets_and_input_as_project_problems() {
 }
 
 #[test]
+fn checks_each_referenced_lua_file_once_without_running_it() {
+    let root = Temp::new("lua-syntax");
+    let mut manifest = manifest(&root.0);
+    manifest.scenes.truncate(1);
+    manifest.input = None;
+    save_project(&root.0.join("project.xgc"), &manifest).unwrap();
+    fs::create_dir(root.0.join("Scripts")).unwrap();
+    let broken = "Scripts/broken.lua";
+    let valid = "Scripts/valid.lua";
+    fs::write(root.0.join(broken), "local value = 1\nlocal =\n").unwrap();
+    fs::write(
+        root.0.join(format!("{broken}.meta")),
+        "(guid: \"aabbccdd\")",
+    )
+    .unwrap();
+    fs::write(root.0.join(valid), "error('检查时不该运行')\n").unwrap();
+    let mut scene = World::new();
+    for path in [broken, "guid://aabbccdd", valid] {
+        scene.spawn((Script { path: path.into() },));
+    }
+    save_world(&root.0.join(&manifest.entry_scene), &scene.world_data()).unwrap();
+
+    let before = snapshot(&root.0);
+    let text = String::from_utf8(check(&root.0, 2).stdout).unwrap();
+    assert!(text.contains("scripts=2 assets=1 problems=1"), "{text}");
+    assert_eq!(text.matches("[SCRIPT.COMPILE]").count(), 1, "{text}");
+    assert!(text.contains("Scripts/broken.lua:2:0"), "{text}");
+    for (path, expected) in [(broken, 2), (valid, 0), ("missing.lua", 1)] {
+        let output = xgc()
+            .current_dir(&root.0)
+            .args(["script-check", path])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected), "{output:?}");
+        if expected == 2 {
+            let diagnostic = String::from_utf8(output.stderr).unwrap();
+            assert!(text.contains(diagnostic.trim()), "{text}\n{diagnostic}");
+        }
+    }
+    assert_eq!(snapshot(&root.0), before);
+}
+
+#[test]
 fn entry_read_failure_is_fatal_and_manifest_selection_does_not_fall_back() {
     let root = Temp::new("bad-entry");
     let manifest = manifest(&root.0);

@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value as Json};
 
-use crate::{schemas, Agent};
+use crate::{schemas, script_check, Agent};
 
 pub(super) struct Method {
     pub(super) name: &'static str,
@@ -43,7 +43,7 @@ impl Method {
     }
 }
 
-pub(super) static METHODS: [Method; 17] = [
+pub(super) static METHODS: [Method; 18] = [
     Method::new(
         "engine.describe",
         "查看协议版本、方法、组件与能力目录，以及当前世界的摘要。",
@@ -145,6 +145,12 @@ pub(super) static METHODS: [Method; 17] = [
         "尝试回滚当前会话最后一笔可回滚的事务，仍会检查世界版本。",
         schemas::no_params,
         |agent, _| agent.undo(),
+    ),
+    Method::new(
+        "script.check",
+        "编译内联 Lua 源码，返回语法检查结果和诊断。",
+        schemas::script_check,
+        |_, params| script_check::check(params),
     ),
 ];
 

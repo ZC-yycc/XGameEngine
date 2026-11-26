@@ -11,5 +11,6 @@ xgc-base = { path = "../xgc-base" }
 xgc-reflect = { path = "../xgc-reflect" }
 xgc-world = { path = "../xgc-world" }
 xgc-sim = { path = "../xgc-sim" }
+xgc-script = { path = "../xgc-script" }
 xgc-store = { path = "../xgc-store" }
 serde_json.workspace = true

@@ -16,6 +16,7 @@ use xgc_world::{builtin_registry, Command, Transform, World};
 use lua_value::{lua_to_value, value_to_lua};
 
 mod character_api;
+mod compile;
 mod component_data;
 mod legacy;
 mod lifecycle;
@@ -25,6 +26,7 @@ mod ui_api;
 mod ui_focus_api;
 mod ui_spawn_api;
 mod view;
+pub use compile::check_source;
 pub use legacy::{euler_to_quat, EntityView, ScriptView};
 pub use runtime::ScriptRuntime;
 pub use view::UiElementView;
@@ -473,10 +475,8 @@ impl LuaHost {
 
     pub fn run(&self, name: &str, source: &str) -> Result<(), String> {
         self.reset_budget();
-        self.lua
-            .load(source)
-            .set_name(name)
-            .exec()
+        compile::compile_text(&self.lua, name, source)
+            .and_then(|function| function.call::<()>(()))
             .map_err(|err| format!("脚本 {name} 执行失败：{err}"))
     }
 

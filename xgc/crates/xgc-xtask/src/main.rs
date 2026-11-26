@@ -132,6 +132,7 @@ fn deps(root: &Path) -> Result<(), String> {
             &[
                 "xgc-base",
                 "xgc-reflect",
+                "xgc-script",
                 "xgc-sim",
                 "xgc-world",
                 "xgc-store",

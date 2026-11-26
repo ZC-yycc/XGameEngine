@@ -60,6 +60,7 @@ fn tools_list_exposes_every_agent_method() {
         "edit.apply",
         "edit.revert",
         "edit.undo",
+        "script.check",
     ];
     assert_eq!(description["methods"], json!(methods));
     let details = description["method_details"].as_array().unwrap();
@@ -78,6 +79,23 @@ fn tools_list_exposes_every_agent_method() {
             "{method}: {response}"
         );
     }
+}
+
+#[test]
+fn checks_inline_lua_through_the_same_tool() {
+    let mut mcp = Mcp::new();
+    let checked = invoke(
+        &mut mcp,
+        "script_check",
+        json!({"source": "\nlocal = 5", "name": null}),
+    );
+    assert_eq!(checked["valid"], false);
+    assert_eq!(checked["diagnostics"][0]["script"], "inline.lua");
+    assert_eq!(checked["diagnostics"][0]["line"], 2);
+    assert_eq!(
+        checked["diagnostics"][0]["code"],
+        xgc_base::diagnostics::SCRIPT_COMPILE
+    );
 }
 
 #[test]
@@ -113,6 +131,7 @@ fn tools_advertise_their_actual_inputs() {
         ("edit_plan", "commands"),
         ("edit_apply", "plan_id"),
         ("edit_revert", "tx_id"),
+        ("script_check", "source"),
     ] {
         assert_eq!(schema(name)["required"], json!([field]), "{name}");
         assert!(schema(name)["properties"][field].is_object(), "{name}");
@@ -126,6 +145,11 @@ fn tools_advertise_their_actual_inputs() {
         assert_eq!(types[0]["type"], "integer");
         assert_eq!(types[1]["type"], "string");
     }
+
+    let script = &schema("script_check")["properties"];
+    assert_eq!(script["source"]["type"], "string");
+    assert_eq!(script["name"]["type"], json!(["string", "null"]));
+    assert_eq!(script["name"]["default"], "inline.lua");
 
     let variants = schema("edit_plan")["properties"]["commands"]["items"]["oneOf"]
         .as_array()

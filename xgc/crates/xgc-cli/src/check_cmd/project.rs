@@ -84,7 +84,7 @@ pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckRepo
     if let Some(input) = &manifest.input {
         audit.input(input, project.input_path());
     }
-    audit.report.scripts = audit.scripts.len();
+    audit.check_scripts();
     Ok(audit.report)
 }
 
@@ -311,6 +311,28 @@ impl Audit<'_> {
                     "asset.missing"
                 };
                 self.problem(code, location, &format!("{name} {reference}：{err}"));
+            }
+        }
+    }
+
+    fn check_scripts(&mut self) {
+        self.report.scripts = self.scripts.len();
+        for path in &self.scripts {
+            let name = path
+                .strip_prefix(&self.root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            match fs::read_to_string(path) {
+                Ok(source) => {
+                    if let Err(diagnostic) = xgc_script::check_source(&name, &source) {
+                        self.report.problems.push(diagnostic.to_string());
+                    }
+                }
+                Err(err) => self
+                    .report
+                    .problems
+                    .push(format!("[script.read] {name}：{err}")),
             }
         }
     }

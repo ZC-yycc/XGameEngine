@@ -27,6 +27,7 @@ mod plan_cmd;
 mod project_render;
 mod render;
 mod runtime_cmd;
+mod script_cmd;
 mod trace_cmd;
 mod world_cmd;
 
@@ -134,6 +135,7 @@ fn main() -> ExitCode {
         Some("play") => audio::play_wav(args.next().as_deref()),
         Some("input") => input_cmd::inspect(args.next().as_deref()),
         Some("lua") => lua(args.next().as_deref()),
+        Some("script-check") => script_cmd::check(args.next().as_deref()),
         Some("render-frame") => render::render_frame(
             args.next().as_deref(),
             args.next().as_deref(),
@@ -145,13 +147,13 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("未知命令：{other}");
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|mcp|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
+                "用法：xgc <schema|check [路径]|script-check <脚本.lua>|bench|plan|serve|mcp|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
-                "用法：xgc <schema|check [路径]|bench|plan|serve|mcp|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
+                "用法：xgc <schema|check [路径]|script-check <脚本.lua>|bench|plan|serve|mcp|export <路径>|import <路径>|run [帧数]|migrate <旧.ron|旧目录> <新.json|新目录> [--dry-run]|render-graph|gpu-probe|mesh-probe <路径>|assets <项目根>|render-frame <世界.json> <out.ppm> [资产根] [宽] [高] [帧数]|run-world <世界.json> [帧数] [线程数]|trace <世界.json> [帧数] [资产根] [线程数]|gate <世界.json> <资产根> <参考目录> [总差异%] [结构性%] [--strict-total]|gpu-env [参考目录]|parity <旧图> <新图> [结构性%] [内部%]>"
             );
             ExitCode::from(2)
         }
