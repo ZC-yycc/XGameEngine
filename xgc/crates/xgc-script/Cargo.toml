@@ -11,3 +11,6 @@ mlua = { version = "0.10", features = ["lua54", "vendored"] }
 xgc-base = { path = "../xgc-base" }
 xgc-world = { path = "../xgc-world" }
 xgc-asset = { path = "../xgc-asset" }
+
+[build-dependencies]
+cc = "1"

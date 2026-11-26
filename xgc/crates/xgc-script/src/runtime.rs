@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use xgc_asset::{AssetCatalog, AssetPaths, SearchPaths};
 use xgc_base::EntityId;
-use xgc_world::{AnimationLayers, AnimationState, Command, Component, Script, Value, World};
+use xgc_world::{AnimationLayers, AnimationState, Component, Script, Value, World};
 
 use crate::legacy::{EntityView, ScriptView};
 use crate::view::UiElementView;
@@ -15,8 +15,15 @@ use crate::LuaHost;
 
 struct Entry {
     host: LuaHost,
-    commands: Rc<RefCell<Vec<Command>>>,
     source: PathBuf,
+}
+
+impl Entry {
+    fn error_for(&self, entity: EntityId, result: Result<bool, String>) -> Option<String> {
+        result
+            .err()
+            .map(|err| format!("{} 实体 {entity}：{err}", self.source.display()))
+    }
 }
 
 pub struct ScriptRuntime {
@@ -66,15 +73,16 @@ impl ScriptRuntime {
         });
         scripts.sort_by_key(|(entity, _)| *entity);
         let live: HashSet<EntityId> = scripts.iter().map(|(entity, _)| *entity).collect();
-        let stale: Vec<EntityId> = self
+        let mut stale: Vec<EntityId> = self
             .entries
             .keys()
             .filter(|entity| !live.contains(entity))
             .copied()
             .collect();
+        stale.sort_unstable();
         for entity in stale {
             if let Some(entry) = self.entries.remove(&entity) {
-                if let Err(err) = entry.host.destroy() {
+                if let Some(err) = entry.error_for(entity, entry.host.destroy()) {
                     self.note_error(&err);
                 }
             }
@@ -94,14 +102,14 @@ impl ScriptRuntime {
                 }
             }
             let started = self.started.insert(entity);
-            let entry = self.entries.get_mut(&entity).expect("刚插入");
+            let entry = self.entries.get(&entity).expect("刚插入");
             let start_error = if started {
-                entry.host.start_legacy().err()
+                entry.error_for(entity, entry.host.start_legacy())
             } else {
                 None
             };
-            let update_error = entry.host.update_legacy(dt).err();
-            let fixed_error = entry.host.fixed_legacy().err();
+            let update_error = entry.error_for(entity, entry.host.update_legacy(dt));
+            let fixed_error = entry.error_for(entity, entry.host.fixed_legacy());
             pending.extend(entry.host.take_commands());
             if let Some(err) = start_error {
                 self.note_error(&err);
@@ -121,12 +129,12 @@ impl ScriptRuntime {
             .map(|event| (event.entity, event.other, event.enter))
             .collect();
         for (entity, other, enter) in collisions {
-            let result = self.entries.get_mut(&entity).map(|entry| {
-                let result = entry.host.collision_legacy(enter, other);
+            let error = self.entries.get(&entity).and_then(|entry| {
+                let error = entry.error_for(entity, entry.host.collision_legacy(enter, other));
                 pending.extend(entry.host.take_commands());
-                result
+                error
             });
-            if let Some(Err(err)) = result {
+            if let Some(err) = error {
                 self.note_error(&err);
             }
         }
@@ -139,12 +147,12 @@ impl ScriptRuntime {
             .map(|event| (event.entity, event.name.clone()))
             .collect();
         for (entity, name) in anim_events {
-            let result = self.entries.get_mut(&entity).map(|entry| {
-                let result = entry.host.anim_event_legacy(&name);
+            let error = self.entries.get(&entity).and_then(|entry| {
+                let error = entry.error_for(entity, entry.host.anim_event_legacy(&name));
                 pending.extend(entry.host.take_commands());
-                result
+                error
             });
-            if let Some(Err(err)) = result {
+            if let Some(err) = error {
                 self.note_error(&err);
             }
         }
@@ -180,16 +188,14 @@ impl ScriptRuntime {
             .map_err(|err| format!("读取脚本 {path} 失败：{err}"))?;
         let source = std::fs::read_to_string(&resolved)
             .map_err(|err| format!("读取 {} 失败：{err}", resolved.display()))?;
-        let commands = Rc::new(RefCell::new(Vec::new()));
         let host = LuaHost::with_commands_and_view(
-            Rc::clone(&commands),
+            Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&self.view),
             entity.raw(),
         )?;
         host.load_script(path, &source)?;
         Ok(Entry {
             host,
-            commands,
             source: resolved,
         })
     }
@@ -318,13 +324,15 @@ impl ScriptRuntime {
 
     /// 重新读取磁盘并执行所有已加载脚本；场景脚本热重载入口。
     pub fn reload_all(&mut self) -> Result<(), String> {
-        for entry in self.entries.values() {
+        let mut entities: Vec<_> = self.entries.keys().copied().collect();
+        entities.sort_unstable();
+        for entity in entities {
+            let entry = &self.entries[&entity];
             let source = std::fs::read_to_string(&entry.source)
                 .map_err(|err| format!("读取 {} 失败：{err}", entry.source.display()))?;
             entry
                 .host
                 .load_script(&entry.source.to_string_lossy(), &source)?;
-            let _ = &entry.commands;
         }
         Ok(())
     }

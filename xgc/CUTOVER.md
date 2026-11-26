@@ -56,6 +56,8 @@
 
 `script.check` 及 MCP 的 `script_check` 接受内联 Lua 源码，`xgc script-check <脚本.lua>` 读取单文件。这两个入口和项目体检都调用运行时的 Lua 5.4 文本编译器，语法错误为 `SCRIPT.COMPILE`，包含可确定的脚本名与行号。检查不执行脚本。 [脚本检查回归](crates/xgc-agent/tests/script_check.rs)
 
+Lua VM 默认使用 128 MiB 内存上限。每次钩子调用有约 20 万条指令额度，调用内协程共用额度。超限结束当前调用，后续钩子仍可使用同一 VM。Lua 文件由宿主装载，运行时动态编译只接受文本。回归覆盖会恢复的协程、受保护调用、内存诊断和下一次调用恢复。变更后 showcase 的 151 个脚本轨迹检查点逐字节一致，角色场景运行 120 帧的哈希仍为 `c0f893f81c462fcd`。[沙箱回归](crates/xgc-script/tests/sandbox.rs)
+
 ## glTF 动画插值
 
 glTF 的三次样条 TRS 轨道保留入切线、关键值和出切线。姿势和根运动共用 Hermite 采样，切线按段长缩放。旋转在采样后归一化，退化时用关键帧间的球面插值。回归覆盖两秒段、循环根运动、退化旋转，以及错误输出组数和越界访问器。[glTF 动画回归](crates/xgc-render/tests/animations.rs)

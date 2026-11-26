@@ -3423,6 +3423,7 @@ dependencies = [
 name = "xgc-script"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "mlua",
  "xgc-asset",
  "xgc-base",

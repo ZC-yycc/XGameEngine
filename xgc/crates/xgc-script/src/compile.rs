@@ -31,7 +31,7 @@ pub fn check_source(name: &str, source: &str) -> Result<(), Diagnostic> {
                 return Err(diagnostic(message.to_string()).with_span(Span::new(name, line, 0)));
             }
         }
-        return Err(diagnostic(err.to_string()));
+        return Err(diagnostic(host.describe_error(&err)));
     }
     Ok(())
 }

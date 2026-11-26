@@ -3,18 +3,17 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use mlua::{
-    FromLua, FromLuaMulti, HookTriggers, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib,
-    Value as LuaValue, VmState,
+    ChunkMode, FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib,
+    Value as LuaValue,
 };
 use xgc_base::EntityId;
 use xgc_world::{builtin_registry, Command, Transform, World};
 
 use lua_value::{lua_to_value, value_to_lua};
 
+mod budget;
 mod character_api;
 mod compile;
 mod component_data;
@@ -22,6 +21,7 @@ mod legacy;
 mod lifecycle;
 mod lua_value;
 mod runtime;
+mod sandbox;
 mod ui_api;
 mod ui_focus_api;
 mod ui_spawn_api;
@@ -31,11 +31,14 @@ pub use legacy::{euler_to_quat, EntityView, ScriptView};
 pub use runtime::ScriptRuntime;
 pub use view::UiElementView;
 
+const MEMORY_LIMIT: usize = 128 * 1024 * 1024;
+
 pub struct LuaHost {
     lua: Lua,
     world: Option<Rc<RefCell<World>>>,
     scripts: RefCell<BTreeMap<String, String>>,
-    budget: Option<(Arc<AtomicUsize>, usize)>,
+    instruction_limit: usize,
+    memory_limit: Cell<usize>,
     started: Cell<bool>,
     commands: Option<Rc<RefCell<Vec<Command>>>>,
     self_id: u64,
@@ -47,30 +50,31 @@ impl LuaHost {
         let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
         let lua = Lua::new_with(libs, LuaOptions::default())
             .map_err(|err| format!("创建 Lua 运行时失败：{err}"))?;
-        Ok(Self {
+        sandbox::configure(&lua).map_err(|err| format!("配置 Lua 安全标准库失败：{err}"))?;
+        budget::install(&lua).map_err(|err| format!("设置 Lua 指令预算失败：{err}"))?;
+        let host = Self {
             lua,
             world: None,
             scripts: RefCell::new(BTreeMap::new()),
-            budget: None,
+            instruction_limit: budget::DEFAULT_INSTRUCTION_LIMIT,
+            memory_limit: Cell::new(0),
             started: Cell::new(false),
             commands: None,
             self_id: 0,
-        })
+        };
+        if let Err(err) = host.set_memory_limit(MEMORY_LIMIT) {
+            // 外部分配器可能不支持限额，保留 VM 并让宿主能看到警告。
+            eprintln!("script: {err}");
+        }
+        Ok(host)
     }
 
     /// 脚本只产生命令；由调用方在帧末 plan / apply，保证事务边界。
     pub fn with_commands(commands: Rc<RefCell<Vec<Command>>>) -> Result<Self, String> {
-        let host = Self::new()?;
+        let mut host = Self::new()?;
         host.register_commands(&commands, None)?;
-        Ok(Self {
-            lua: host.lua,
-            world: None,
-            scripts: RefCell::new(BTreeMap::new()),
-            budget: None,
-            started: Cell::new(false),
-            commands: Some(commands),
-            self_id: 0,
-        })
+        host.commands = Some(commands);
+        Ok(host)
     }
 
     pub fn with_commands_and_view(
@@ -78,18 +82,12 @@ impl LuaHost {
         view: Rc<RefCell<legacy::ScriptView>>,
         self_id: u64,
     ) -> Result<Self, String> {
-        let host = Self::new()?;
+        let mut host = Self::new()?;
         host.register_commands(&commands, Some(Rc::clone(&view)))?;
         legacy::register(&host.lua, &commands, &view, self_id)?;
-        Ok(Self {
-            lua: host.lua,
-            world: None,
-            scripts: RefCell::new(BTreeMap::new()),
-            budget: None,
-            started: Cell::new(false),
-            commands: Some(commands),
-            self_id,
-        })
+        host.commands = Some(commands);
+        host.self_id = self_id;
+        Ok(host)
     }
 
     fn register_commands(
@@ -174,46 +172,63 @@ impl LuaHost {
 
     /// 内存上限（字节）；返回旧上限。超限后 Lua 分配失败，不拖垮宿主。
     pub fn set_memory_limit(&self, bytes: usize) -> Result<usize, String> {
-        self.lua
+        let previous = self
+            .lua
             .set_memory_limit(bytes)
-            .map_err(|err| format!("设置 Lua 内存上限失败：{err}"))
+            .map_err(|err| format!("设置 Lua 内存上限失败：{err}"))?;
+        self.memory_limit.set(bytes);
+        Ok(previous)
     }
+
     pub fn with_world(world: Rc<RefCell<World>>) -> Result<Self, String> {
-        let host = Self::new()?;
+        let mut host = Self::new()?;
         host.register_world(&world)?;
-        Ok(Self {
-            lua: host.lua,
-            world: Some(world),
-            scripts: RefCell::new(BTreeMap::new()),
-            budget: None,
-            started: Cell::new(false),
-            commands: None,
-            self_id: 0,
-        })
+        host.world = Some(world);
+        Ok(host)
     }
 
-    /// 指令预算：每 N 条指令检查一次，超限返回 Lua 错误；每次 run / eval / call 前重置。
+    /// 指令预算在每次调用开始时重置，钩子按块计数以减少正常帧的回调开销。
     pub fn set_instruction_limit(&mut self, limit: usize) {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let hook_counter = Arc::clone(&counter);
-        let budget = Arc::new(limit);
-        self.lua.set_hook(
-            HookTriggers::new().every_nth_instruction(1000),
-            move |_, _| {
-                let used = hook_counter.fetch_add(1000, Ordering::Relaxed) + 1000;
-                if used > *budget {
-                    Err(mlua::Error::RuntimeError("Lua 指令预算超限".to_string()))
-                } else {
-                    Ok(VmState::Continue)
-                }
-            },
-        );
-        self.budget = Some((counter, limit));
+        self.instruction_limit = limit;
     }
 
-    fn reset_budget(&self) {
-        if let Some((counter, _)) = &self.budget {
-            counter.store(0, Ordering::Relaxed);
+    fn with_budget<T>(
+        &self,
+        context: impl FnOnce() -> String,
+        run: impl FnOnce() -> mlua::Result<T>,
+    ) -> Result<T, String> {
+        let budget = budget::BudgetScope::enter(self.instruction_limit);
+        let result = run();
+        if budget.exhausted() {
+            return Err(format!("{}：Lua 指令预算超限，已中断本次调用", context()));
+        }
+        result.map_err(|err| format!("{}：{}", context(), self.describe_error(&err)))
+    }
+
+    fn describe_error(&self, error: &mlua::Error) -> String {
+        let mut cause = error;
+        loop {
+            match cause {
+                mlua::Error::MemoryError(_) => {
+                    const KIB: usize = 1024;
+                    const MIB: usize = KIB * KIB;
+                    let limit = self.memory_limit.get();
+                    return match limit {
+                        0 => "Lua 内存分配失败，已中断本次调用".into(),
+                        n if n % MIB == 0 => {
+                            format!("脚本内存超限（上限 {} MiB），已中断本次调用", n / MIB)
+                        }
+                        n if n % KIB == 0 => {
+                            format!("脚本内存超限（上限 {} KiB），已中断本次调用", n / KIB)
+                        }
+                        n => format!("脚本内存超限（上限 {n} 字节），已中断本次调用"),
+                    };
+                }
+                mlua::Error::CallbackError { cause: next, .. }
+                | mlua::Error::BadArgument { cause: next, .. }
+                | mlua::Error::WithContext { cause: next, .. } => cause = next,
+                _ => return error.to_string(),
+            }
         }
     }
 
@@ -242,25 +257,20 @@ impl LuaHost {
 
     /// 调用生命周期钩子；脚本没有该函数时返回 false。
     pub fn call_hook(&self, name: &str, dt: f32) -> Result<bool, String> {
-        let value: LuaValue = self
-            .lua
-            .globals()
-            .get(name)
-            .map_err(|err| format!("读取钩子 {name} 失败：{err}"))?;
-        let LuaValue::Function(function) = value else {
-            return Ok(false);
-        };
-        self.reset_budget();
-        if name == "on_update" {
-            function
-                .call::<()>(dt)
-                .map_err(|err| format!("Lua 钩子 {name} 失败：{err}"))?;
-        } else {
-            function
-                .call::<()>(())
-                .map_err(|err| format!("Lua 钩子 {name} 失败：{err}"))?;
-        }
-        Ok(true)
+        self.with_budget(
+            || format!("Lua 钩子 {name} 失败"),
+            || {
+                let LuaValue::Function(function) = self.lua.globals().get::<LuaValue>(name)? else {
+                    return Ok(false);
+                };
+                if name == "on_update" {
+                    function.call::<()>(dt)?;
+                } else {
+                    function.call::<()>(())?;
+                }
+                Ok(true)
+            },
+        )
     }
 
     /// 首次调用触发 `on_start`；重复调用返回 false。
@@ -474,30 +484,21 @@ impl LuaHost {
     }
 
     pub fn run(&self, name: &str, source: &str) -> Result<(), String> {
-        self.reset_budget();
-        compile::compile_text(&self.lua, name, source)
-            .and_then(|function| function.call::<()>(()))
-            .map_err(|err| format!("脚本 {name} 执行失败：{err}"))
+        self.with_budget(
+            || format!("脚本 {name} 执行失败"),
+            || compile::compile_text(&self.lua, name, source)?.call::<()>(()),
+        )
     }
 
     pub fn eval<T: FromLuaMulti>(&self, source: &str) -> Result<T, String> {
-        self.reset_budget();
-        self.lua
-            .load(source)
-            .eval()
-            .map_err(|err| format!("Lua 求值失败：{err}"))
+        self.with_budget(
+            || "Lua 求值失败".into(),
+            || self.lua.load(source).set_mode(ChunkMode::Text).eval(),
+        )
     }
 
     pub fn call<T: FromLua>(&self, name: &str, args: impl IntoLuaMulti) -> Result<T, String> {
-        self.reset_budget();
-        let function: mlua::Function = self
-            .lua
-            .globals()
-            .get(name)
-            .map_err(|err| format!("读取 Lua 函数 {name} 失败：{err}"))?;
-        function
-            .call(args)
-            .map_err(|err| format!("Lua 函数 {name} 调用失败：{err}"))
+        self.call_multi(name, args)
     }
 
     pub fn call_multi<T: FromLuaMulti>(
@@ -505,34 +506,32 @@ impl LuaHost {
         name: &str,
         args: impl IntoLuaMulti,
     ) -> Result<T, String> {
-        self.reset_budget();
-        let function: mlua::Function = self
-            .lua
-            .globals()
-            .get(name)
-            .map_err(|err| format!("读取 Lua 函数 {name} 失败：{err}"))?;
-        function
-            .call(args)
-            .map_err(|err| format!("Lua 函数 {name} 调用失败：{err}"))
+        self.with_budget(
+            || format!("Lua 函数 {name} 调用失败"),
+            || self.lua.globals().get::<mlua::Function>(name)?.call(args),
+        )
     }
 
     pub fn set_global(&self, name: &str, value: impl IntoLua) -> Result<(), String> {
-        self.lua
-            .globals()
-            .set(name, value)
-            .map_err(|err| format!("写入 Lua 全局 {name} 失败：{err}"))
+        self.with_budget(
+            || format!("写入 Lua 全局 {name} 失败"),
+            || self.lua.globals().set(name, value),
+        )
     }
 
     pub fn global_is_nil(&self, name: &str) -> Result<bool, String> {
-        let value: LuaValue = self
-            .lua
-            .globals()
-            .get(name)
-            .map_err(|err| format!("读取 Lua 全局 {name} 失败：{err}"))?;
-        Ok(matches!(value, LuaValue::Nil))
+        self.with_budget(
+            || format!("读取 Lua 全局 {name} 失败"),
+            || {
+                Ok(matches!(
+                    self.lua.globals().get::<LuaValue>(name)?,
+                    LuaValue::Nil
+                ))
+            },
+        )
     }
 
-    /// 只读脚本名列表：`package.loaded` 不可用，这里用宿主登记表代替。
+    /// 供宿主注册 Rust 绑定。运行用户脚本使用 `run` / `eval` / `call`，由它们设置调用预算。
     pub fn lua(&self) -> &Lua {
         &self.lua
     }
