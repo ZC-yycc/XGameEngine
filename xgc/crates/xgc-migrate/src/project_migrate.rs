@@ -313,6 +313,7 @@ fn plan_project(root: &Path, project: &OldProject) -> Result<Plan, ProjectMigrat
         .map_err(|err| ProjectMigrationError::Manifest(err.to_string()))?;
 
     let mut prefabs = PrefabPlans::read(root, &manifest.content.prefabs, &scenes)?;
+    // 随原目录复制兜底资源和伴生文件，场景里的逻辑路径仍按清单顺序解析。
     let directories: Vec<_> = [
         &manifest.content.models,
         &manifest.content.textures,
@@ -322,6 +323,7 @@ fn plan_project(root: &Path, project: &OldProject) -> Result<Plan, ProjectMigrat
     ]
     .into_iter()
     .chain(manifest.content.shaders.iter())
+    .chain(&manifest.search_paths)
     .cloned()
     .collect();
     let copies = Copies::plan(
@@ -335,10 +337,7 @@ fn plan_project(root: &Path, project: &OldProject) -> Result<Plan, ProjectMigrat
             .into_iter()
             .chain(manifest.scenes.iter().map(String::as_str))
             .chain(prefabs.targets()),
-        directories
-            .iter()
-            .chain(&manifest.search_paths)
-            .map(String::as_str),
+        directories.iter().map(String::as_str),
     )?;
     remap_document_ids(&mut scenes, &mut prefabs);
     prefabs.remap_instances(&mut scenes)?;

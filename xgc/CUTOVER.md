@@ -20,7 +20,7 @@
 
 ## 项目迁移的实体 ID
 
-从 `xgc/` 先运行 `cargo run -q -p xgc-cli --offline -- migrate ../projects/XGame ../tmp/xgc-project --dry-run` 查看计划，去掉 `--dry-run` 后迁移至新目录。两种模式共用预检与报告，包含实际生成的组件数、项目资产引用数、实体 ID 引用数，以及按源文件和旧实体 ID 定位的待移植项。GUID 冲突在预检时报出两条路径。XGame 实测生成 230 个组件、26 处资产引用和 16 处实体引用，组件场景中的 Spinner 与 Bobber 仍需移植运行逻辑。
+从 `xgc/` 先运行 `cargo run -q -p xgc-cli --offline -- migrate ../projects/XGame ../tmp/xgc-project --dry-run` 查看计划，去掉 `--dry-run` 后迁移至新目录。两种模式共用预检与报告，包含实际生成的组件数、项目资产引用数、实体 ID 引用数，以及按源文件和旧实体 ID 定位的待移植项。项目清单的内容根和有序 `search_paths` 共用复制清单，兜底资产及其伴生文件保留源项目的相对目录。GUID 冲突在预检时报出两条路径。XGame 实测生成 230 个组件、26 处资产引用和 16 处实体引用，组件场景中的 Spinner 与 Bobber 仍需移植运行逻辑。
 
 项目先为场景分配 ID，再为预制体分配 ID。两组都按源文件路径和文件内旧 ID 排序。父节点和场景中的预制体成员来源 ID 随之重写，关卡清单保留原顺序。
 
