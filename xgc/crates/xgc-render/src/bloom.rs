@@ -20,6 +20,8 @@
 //!
 //! 乒乓用两块纹理（`a` / `b`）：同一张纹理不能既当输入又当输出。
 
+use xgc_base::render_settings::BloomSettings;
+
 use crate::gpu::GpuContext;
 
 const BLOOM_WGSL: &str = include_str!("bloom.wgsl");
@@ -34,59 +36,6 @@ pub const BLOOM_PASSES: usize = 1 + (BLOOM_LEVELS - 1) + 2 * BLOOM_LEVELS;
 
 /// `BloomParams` 的字节数：4 × f32 + 2 × vec2<f32>。
 const PARAMS_BYTES: usize = 32;
-
-/// 光晕参数：与旧端 `BloomConfig` 逐字段、逐缺省值一致。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BloomSettings {
-    /// 光晕强度（叠加比例，0 = 关闭）。
-    pub intensity: f32,
-    /// 亮部提取阈值（曝光后的线性亮度；1.0 ≈ 显示白点）。
-    pub threshold: f32,
-    /// 软膝半宽：阈值附近多宽的一段"淡入"，避免亮斑边缘出现硬边。
-    pub knee: f32,
-}
-
-impl Default for BloomSettings {
-    fn default() -> Self {
-        Self {
-            intensity: 0.0,
-            threshold: 1.0,
-            knee: 0.6,
-        }
-    }
-}
-
-impl BloomSettings {
-    /// 光晕强度的上限：再亮只是整幅糊成一片白，没有可用的画面。
-    pub const MAX_INTENSITY: f32 = 10.0;
-    /// 阈值上限：场景亮度标定是"白面 ≈ 1.0"，100 已远超任何真实内容。
-    pub const MAX_THRESHOLD: f32 = 100.0;
-    /// 软膝半宽上限（线性亮度单位）。
-    pub const MAX_KNEE: f32 = 4.0;
-
-    /// 容错读取（同旧端 `BloomConfig::sanitized` 的契约）：NaN / 无穷 / 负数
-    /// 落回默认值，合法但离谱的量级夹进安全范围。
-    pub fn sanitized(self) -> Self {
-        let fallback = Self::default();
-        let clamp = |value: f32, max: f32, default: f32| {
-            if value.is_finite() {
-                value.clamp(0.0, max)
-            } else {
-                default
-            }
-        };
-        Self {
-            intensity: clamp(self.intensity, Self::MAX_INTENSITY, fallback.intensity),
-            threshold: clamp(self.threshold, Self::MAX_THRESHOLD, fallback.threshold),
-            knee: clamp(self.knee, Self::MAX_KNEE, fallback.knee),
-        }
-    }
-
-    /// `intensity == 0` 即关闭：不设独立开关，两个字段表达同一状态迟早互相矛盾。
-    pub fn is_enabled(&self) -> bool {
-        self.intensity > 0.0
-    }
-}
 
 /// 第 `level` 级的尺寸：a0 是 ½，a1 是 ¼，a2 是 ⅛；极小目标退到 1 像素。
 fn level_size(width: u32, height: u32, level: usize) -> (u32, u32) {

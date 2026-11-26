@@ -44,9 +44,7 @@ pub(crate) const PARAMS_BYTES: usize = 448;
 const SSAO_WGSL: &str = include_str!("ssao.wgsl");
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-mod settings;
-
-pub use settings::SsaoSettings;
+use xgc_base::render_settings::SsaoSettings;
 
 /// 固定种子 LCG 生成半球 kernel（同一构建在任何机器上都是同一组向量）。
 ///

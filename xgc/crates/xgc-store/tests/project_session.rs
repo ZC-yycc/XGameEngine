@@ -35,6 +35,8 @@ fn manifest() -> ProjectManifest {
         },
         search_paths: Vec::new(),
         input: None,
+        render: Default::default(),
+        quality: Default::default(),
     }
 }
 

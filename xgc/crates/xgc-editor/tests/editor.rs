@@ -423,6 +423,8 @@ fn switches_scenes_through_the_project_manifest() {
             },
             search_paths: Vec::new(),
             input: None,
+            render: Default::default(),
+            quality: Default::default(),
         },
     )
     .unwrap();
@@ -503,6 +505,8 @@ fn lists_project_assets_without_meta_files() {
             },
             search_paths: Vec::new(),
             input: None,
+            render: Default::default(),
+            quality: Default::default(),
         },
     )
     .unwrap();

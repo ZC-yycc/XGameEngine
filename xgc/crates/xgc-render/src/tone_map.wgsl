@@ -5,16 +5,15 @@
 // 整段采样被跳过（条件是 uniform，整趟 pass 走同一分支，采样处在一致性
 // 控制流里），采样器与三级纹理仍绑着占位资源。
 
-// 曝光 + 光晕强度 + 三级权重。曝光与亮部提取（`bloom.wgsl` 的 `fs_bright`）
-// 必须用同一个乘子：光晕阈值是按曝光后的亮度定义的。末尾三个 0 是
-// uniform 结构的 16 字节对齐填充（整块 32 字节）。
+// 曝光 + 光晕强度 + 三级权重 + 曲线开关。曝光与亮部提取（`bloom.wgsl` 的
+// `fs_bright`）使用同一个乘子，因为光晕阈值定义在曝光之后。末尾填充到 32 字节。
 struct ToneParams {
     exposure: f32,   // 曲线之前的线性光乘子（缺省 1.0）
     intensity: f32,  // 0 = 不加光晕（分支跳过，不去采样各级纹理）
     w0: f32,         // 三级光晕的合成权重
     w1: f32,
     w2: f32,
-    _pad0: f32,
+    bypass_aces: u32,
     _pad1: f32,
     _pad2: f32,
 }
@@ -83,5 +82,8 @@ fn fs(input: VsOut) -> @location(0) vec4<f32> {
         scene += glow * tone.intensity;
     }
     // 显示目标是最终不透明帧；材质/粒子/光晕的中间 alpha 不得泄漏到视口。
+    if (tone.bypass_aces != 0u) {
+        return vec4<f32>(clamp(scene, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
     return vec4<f32>(aces(scene), 1.0);
 }

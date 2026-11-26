@@ -1,12 +1,14 @@
 //! XGame Core 的基础类型。
 //!
 //! 这里只放**跨子系统共享、且不依赖任何子系统**的东西：持久实体身份、运行时
-//! 句柄、诊断。渲染 / 物理 / 脚本的类型不许进这个 crate，否则依赖方向会反转。
+//! 句柄、诊断，以及各宿主共用的项目设置。渲染 / 物理 / 脚本的运行时类型
+//! 不进入这个 crate，保证配置读写不依赖任何后端。
 
 #![deny(unsafe_code)]
 
 pub mod diagnostics;
 pub mod path;
+pub mod render_settings;
 
 pub use diagnostics::{catalog as diagnostic_catalog, DiagnosticCode};
 

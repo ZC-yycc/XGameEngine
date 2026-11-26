@@ -1,4 +1,4 @@
-//! 方向光阴影的 GPU 侧：2048² 深度数组（每层一个级联）+ 深度 pass 管线。
+//! 方向光阴影的 GPU 侧：深度数组（每层一个级联）+ 深度 pass 管线。
 //!
 //! CPU 侧的级联拟合在 `shadow_csm`（纯函数、可单测）；这里只负责资源与绘制。
 
@@ -44,6 +44,7 @@ pub(super) const CASTER_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState 
 
 /// 阴影图 + 比较采样器 + 深度 pass 管线（设备生命周期内复用）。
 pub(crate) struct ShadowTarget {
+    sizes: [u32; 2],
     map_view: wgpu::TextureView,
     /// 每级一个 layer 视图：深度数组的每一层单独开一次 pass。
     layer_views: [wgpu::TextureView; SHADOW_CASCADES],
@@ -59,23 +60,51 @@ pub(crate) struct ShadowTarget {
     instance_layout: wgpu::BindGroupLayout,
 }
 
+fn directional_views(
+    device: &wgpu::Device,
+    resolution: u32,
+) -> (wgpu::TextureView, [wgpu::TextureView; SHADOW_CASCADES]) {
+    let map = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("xgc-shadow-map"),
+        size: wgpu::Extent3d {
+            width: resolution,
+            height: resolution,
+            depth_or_array_layers: SHADOW_CASCADES as u32,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let array_desc = wgpu::TextureViewDescriptor {
+        label: Some("xgc-shadow-array"),
+        format: Some(wgpu::TextureFormat::Depth32Float),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        aspect: wgpu::TextureAspect::DepthOnly,
+        base_mip_level: 0,
+        mip_level_count: Some(1),
+        base_array_layer: 0,
+        array_layer_count: Some(SHADOW_CASCADES as u32),
+    };
+    let map_view = map.create_view(&array_desc);
+    let layers = std::array::from_fn(|layer| {
+        map.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("xgc-shadow-layer"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: layer as u32,
+            array_layer_count: Some(1),
+            ..array_desc.clone()
+        })
+    });
+    (map_view, layers)
+}
+
 impl ShadowTarget {
-    pub(crate) fn new(context: &GpuContext) -> Self {
+    pub(crate) fn new(context: &GpuContext, sizes: [u32; 2]) -> Self {
+        let [sun, point] = sizes;
         let device = context.device();
-        let map = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("xgc-shadow-map"),
-            size: wgpu::Extent3d {
-                width: SHADOW_RESOLUTION,
-                height: SHADOW_RESOLUTION,
-                depth_or_array_layers: SHADOW_CASCADES as u32,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
         let fallback = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("xgc-shadow-fallback"),
             size: wgpu::Extent3d {
@@ -163,34 +192,10 @@ impl ShadowTarget {
             multiview: None,
             cache: None,
         });
-        let array_desc = wgpu::TextureViewDescriptor {
-            label: Some("xgc-shadow-array"),
-            format: Some(wgpu::TextureFormat::Depth32Float),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            aspect: wgpu::TextureAspect::DepthOnly,
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            base_array_layer: 0,
-            array_layer_count: Some(SHADOW_CASCADES as u32),
-        };
-        let map_view = map.create_view(&array_desc);
-        let mut layer_views = Vec::with_capacity(SHADOW_CASCADES);
-        for layer in 0..SHADOW_CASCADES as u32 {
-            layer_views.push(map.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("xgc-shadow-layer"),
-                format: Some(wgpu::TextureFormat::Depth32Float),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                aspect: wgpu::TextureAspect::DepthOnly,
-                base_mip_level: 0,
-                mip_level_count: Some(1),
-                base_array_layer: layer,
-                array_layer_count: Some(1),
-            }));
-        }
-        let layer_views: [wgpu::TextureView; SHADOW_CASCADES] =
-            layer_views.try_into().expect("层数固定");
+        let (map_view, layer_views) = directional_views(device, sun);
         let skin = super::shadow_skin::SkinnedShadow::new(context, &frame_layout);
         Self {
+            sizes,
             map_view,
             layer_views,
             fallback_view: fallback.create_view(&wgpu::TextureViewDescriptor {
@@ -206,10 +211,25 @@ impl ShadowTarget {
             sampler,
             pipeline,
             skin,
-            point: PointShadowTarget::new(context),
+            point: PointShadowTarget::new(context, point),
             frame_layout,
             instance_layout,
         }
+    }
+
+    pub(crate) fn sizes(&self) -> [u32; 2] {
+        self.sizes
+    }
+
+    /// 换灯只需要重建改变尺寸的贴图，投射管线与蒙皮缓冲仍能复用。
+    pub(crate) fn ensure_sizes(&mut self, context: &GpuContext, sizes: [u32; 2]) {
+        if self.sizes[0] != sizes[0] {
+            (self.map_view, self.layer_views) = directional_views(context.device(), sizes[0]);
+        }
+        if self.sizes[1] != sizes[1] {
+            self.point = PointShadowTarget::new(context, sizes[1]);
+        }
+        self.sizes = sizes;
     }
 
     /// 主 pass 采样用：`(深度图视图, 比较采样器)`；没有阴影时用 1×1 假图。

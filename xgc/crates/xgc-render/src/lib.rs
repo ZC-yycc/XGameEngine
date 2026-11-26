@@ -16,7 +16,6 @@ mod camera;
 mod diff;
 mod draw;
 mod env_map;
-mod exposure;
 mod font;
 mod frame_color;
 mod frame_uniform;
@@ -37,7 +36,6 @@ mod renderer;
 mod resources;
 mod shadow;
 mod shadow_csm;
-mod shadow_settings;
 mod shadow_skin;
 mod shot;
 mod skinned;
@@ -55,7 +53,7 @@ mod tone;
 mod ui_draw;
 
 pub use assets::MeshCache;
-pub use bloom::{BloomSettings, BLOOM_LEVELS, BLOOM_WEIGHTS};
+pub use bloom::{BLOOM_LEVELS, BLOOM_WEIGHTS};
 pub use camera::{
     camera_view_projection, camera_view_projection_with_eye, invert, look_at_rh, model_matrix, mul,
     orthographic_rh, perspective_rh_zo, transform_point, Mat4, IDENTITY,
@@ -67,9 +65,7 @@ pub use diff::{
 pub use draw::{
     build_draw_list, explain_draw_model, AnimatorSample, DrawItem, DrawList, ModelExtractionFailure,
 };
-pub use exposure::{sanitize_exposure, EXPOSURE_DEFAULT, MAX_EXPOSURE, MIN_EXPOSURE};
 pub use font::{load_system_cjk_font, FontAtlas, GlyphQuad};
-pub use fxaa::FxaaSettings;
 pub use glb::{
     load_glb, load_glb_skeleton, load_gltf, load_model, AdditiveLayer, AnimationClip,
     AnimationNode, AnimationPath, AnimationSet, CrossfadeLayer, Interpolation, LayerSample,
@@ -86,15 +82,13 @@ pub use pipeline::{RenderCache, RoundedMeshDraw, TrianglePipeline};
 pub use renderer::{RenderStats, Renderer};
 pub use resources::{ResourceDesc, ResourceKind, ResourceTable, ResourceUsage};
 pub use shadow::{fit_directional_shadow, SHADOW_DEPTH_BIAS, SHADOW_RESOLUTION};
-pub use shadow_settings::ShadowSettings;
 pub use shot::{
     clip_planes, default_shot_direction, frame_bounds, frame_scene, scene_bounds, shot_direction,
     shot_frame, Bounds, ShotCamera, ShotFrame, DEFAULT_FOV_Y,
 };
 pub use skinning::{identity, skin_positions, translation};
-pub use sky::{sh_eval, sky_color, sky_irradiance, SkySettings, SH_COEFFS};
-pub use ssao::SsaoSettings;
-pub use taa::{TaaSettings, DEFAULT_HISTORY_WEIGHT, JITTER_SAMPLES, MAX_HISTORY_WEIGHT};
+pub use sky::{sh_eval, sky_color, sky_irradiance, SH_COEFFS};
+pub use taa::JITTER_SAMPLES;
 pub use text::{text_mesh, text_mesh_wrapped};
 pub use text_draw::TextPipeline;
 pub use texture::TexturePipeline;
@@ -103,6 +97,11 @@ pub use tone::{
     aces, aces_u8, ambient_light, display_u8, fresnel_schlick, sky_kd_env, srgb_encode,
 };
 pub use ui_draw::{cover_uv, quad_matrix};
+pub use xgc_base::render_settings::{
+    sanitize_exposure, BloomSettings, FxaaSettings, QualityPreset, RenderQuality, RenderSettings,
+    ShadowSettings, SkySettings, SsaoSettings, TaaSettings, ToneMapMode, DEFAULT_HISTORY_WEIGHT,
+    EXPOSURE_DEFAULT, MAX_EXPOSURE, MAX_HISTORY_WEIGHT, MIN_EXPOSURE,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pass {

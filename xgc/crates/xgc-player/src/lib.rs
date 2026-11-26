@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use xgc_asset::{AssetPaths, CookRuntime};
 use xgc_host::{asset_paths, ScriptedRunner};
+use xgc_render::{RenderQuality, RenderSettings};
 use xgc_store::{load_world, ProjectSession};
 use xgc_world::{World, WorldData};
 
@@ -36,7 +37,7 @@ enum SceneSource {
     Project(Box<ProjectSession>),
     Cooked {
         root: PathBuf,
-        runtime: Option<CookRuntime>,
+        runtime: Option<Box<CookRuntime>>,
     },
 }
 
@@ -45,6 +46,20 @@ impl SceneSource {
         match self {
             Self::Project(project) => project.root(),
             Self::Cooked { root, .. } => root,
+        }
+    }
+
+    fn render_settings(&self) -> (RenderSettings, RenderQuality) {
+        match self {
+            Self::Project(project) => {
+                let manifest = project.manifest();
+                (manifest.render, manifest.quality)
+            }
+            Self::Cooked { runtime, .. } => {
+                runtime.as_ref().map_or_else(Default::default, |runtime| {
+                    (runtime.render, runtime.quality)
+                })
+            }
         }
     }
 
@@ -93,7 +108,7 @@ fn load_scene(path: &Path, scene: Option<&str>) -> Result<LoadedScene, String> {
         data,
         source: SceneSource::Cooked {
             root: dir.to_path_buf(),
-            runtime: manifest.map(|manifest| manifest.runtime),
+            runtime: manifest.map(|manifest| Box::new(manifest.runtime)),
         },
     })
 }

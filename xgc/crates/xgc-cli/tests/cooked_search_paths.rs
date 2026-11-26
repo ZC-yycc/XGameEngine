@@ -31,6 +31,16 @@ fn cooked_run_uses_the_same_ordered_search_roots_as_the_project() {
         },
         search_paths: vec!["Zulu".into(), "Alpha".into()],
         input: Some("Config/actions.ron".into()),
+        render: xgc_render::RenderSettings {
+            exposure: 2.25,
+            tone_map: xgc_render::ToneMapMode::Off,
+            ..Default::default()
+        },
+        quality: xgc_render::RenderQuality {
+            msaa: Some(1),
+            lod_scale: Some(0.75),
+            ..Default::default()
+        },
     };
     save_project(&source.join("project.xgc"), &project).unwrap();
     fs::write(
@@ -63,6 +73,14 @@ fn cooked_run_uses_the_same_ordered_search_roots_as_the_project() {
     assert!(!cooked.join("input.ron").exists());
     let manifest = cooked.join("cook.json");
     let manifest_bytes = fs::read(&manifest).unwrap();
+    let runtime = xgc_asset::verify_manifest(&cooked)
+        .unwrap()
+        .unwrap()
+        .runtime;
+    assert_eq!(
+        (runtime.render, runtime.quality),
+        (project.render, project.quality)
+    );
     success(xgc().arg("pack").args([&scene, &source, &cooked]));
     assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
 

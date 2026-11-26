@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use xgc_base::path::normalize_project_relative;
+use xgc_base::render_settings::{RenderQuality, RenderSettings};
 
 use crate::{catalog_from_metas, find_files_in, is_link, is_meta, AssetCatalog};
 
@@ -35,18 +36,22 @@ pub struct CookedFile {
     pub hash: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CookRuntime {
     pub search_paths: Vec<String>,
     pub input: Option<String>,
+    #[serde(default, skip_serializing_if = "RenderSettings::is_default")]
+    pub render: RenderSettings,
+    #[serde(default, skip_serializing_if = "RenderQuality::is_default")]
+    pub quality: RenderQuality,
 }
 
 impl CookRuntime {
     /// 单世界没有项目清单，沿用根目录内的可选输入映射。
     pub fn standalone(root: &Path) -> Self {
         Self {
-            search_paths: Vec::new(),
             input: root.join("input.ron").is_file().then(|| "input.ron".into()),
+            ..Self::default()
         }
     }
 
@@ -61,6 +66,8 @@ impl CookRuntime {
         if let Some(path) = &mut self.input {
             *path = normalize("input", path)?;
         }
+        self.render = self.render.sanitized();
+        self.quality = self.quality.sanitized();
         Ok(self)
     }
 }

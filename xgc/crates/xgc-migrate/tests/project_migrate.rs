@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use xgc_migrate::{migrate_old_project, ProjectMigrationError};
 use xgc_store::{load_project, load_world};
 
+#[path = "project_migrate/render.rs"]
+mod render;
 #[path = "project_migrate/search_paths.rs"]
 mod search_paths;
 

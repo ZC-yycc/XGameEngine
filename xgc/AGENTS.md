@@ -170,11 +170,10 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-render/src/frame_color.rs` | 逐 draw 颜色合成：`模型基色因子 + 模型材质因子 → .mat 资产 → 实体覆盖（仅 has_material）→ 选择高亮`（分流前一次做完；模型材质在 mesh 上，别拿 `Material::default()` 顶） |
 | `crates/xgc-render/src/material.rs` | `.mat` 材质资产解析（基色乘子 + metallic / roughness，加载边界清洗） |
 | `crates/xgc-render/src/tone.rs` | ACES 曲线 CPU 镜像与 8 位对表辅助；另含着色器平光口径的 CPU 镜像（`ambient_light` / `fresnel_schlick` / `sky_kd_env`），平光测试期望值由它现算；`env_brdf_approx` / `env_specular` 已随预过滤环境 IBL 删除——镜像必须镜像着色器，留着就是死代码 |
-| `crates/xgc-render/src/shadow_settings.rs` | 阴影画质设置：`softness`（PCSS 灯光尺寸）/ `cascade_blend`（级间混合带宽），`sanitized()` 把非有限 / 非正一律落 0（不夹上界，旧端 `ShadowConfig` 同口径），全 0 = 关（走 3×3 PCF + 硬级间切换，逐位不变） |
+| `crates/xgc-base/src/render_settings.rs` | 项目画面与画质的类型、缺省值和消毒规则。迁移、原生清单、cooked 签名和渲染宿主共用，各宿主通过 `Renderer::apply_project_settings` 生效。MSAA 按设备支持降档，有效 LOD 偏置乘画质缩放，灯的分辨率覆盖画质档 |
 | `crates/xgc-render/src/shadow_csm.rs` | 方向光阴影 CPU 侧：单级拟合 `fit_directional_shadow`（关 CSM 的等价退路）+ **4 级 CSM** `cascade_splits`（λ=0.7）/ `cascade_shadow_matrices`（逐级紧致正交拟合、纹素吸附防抖；带 `overlap` 把非 0 级拟合框近端多铺 `overlap × 本级跨度`，并回填 `view_range` 的相机深度范围），与旧端逐行同式 |
 | `crates/xgc-render/src/shadow.rs` | 方向光阴影 GPU 侧：2048² 深度**数组**（每层一级）+ 逐级深度 pass；静态与蒙皮投射体共用同一支 pass 与同一套 depth bias；接收端按视线深度选层 + 3×3 PCF（`render.shadow` 开时可切 PCSS + 级间混合）、偏置随 N·L 放大；另持 `PointShadowTarget`，点光六面复用同一支深度管线与实例缓冲（`ShadowStats::point_draw_calls` 是诊断口径）；`render` 同时接受方向光级联与点光计划，两者可以只有一个 |
 | `crates/xgc-render/src/sky_draw.rs` | 天空盒 pass：全屏三角形 + 解析天空逐像素求值（远平面 / `LessEqual` / 不写深度），`inv_view_proj` 反推视线方向；着色器 = `sky_common.wgsl`（公式唯一一份、不声明绑定）+ 本地 `SkyFrame`（`inv_view_proj` / `eye` / 嵌套 `SkyUniform`，160B 布局不变） |
-| `crates/xgc-render/src/exposure.rs` | 画面曝光的唯一消毒口径：`EXPOSURE_DEFAULT = 1.0` / `MIN_EXPOSURE = 0.05` / `MAX_EXPOSURE = 20.0` / `sanitize_exposure`（旧端 `RenderConfig::sanitized` 同式：非有限 / 非正落回 1.0、合法值钳制；曝光 0 是"全黑画面"不是关闭态）；乘子在 tone-map 与光晕亮部提取两处共用 |
 | `crates/xgc-render/src/renderer/hdr.rs` | HDR 中间目标与呈现：按尺寸缓存 `Rgba16Float` 场景纹理（采样数 > 1 时另有一张多采样纹理，`SceneViews` 每帧给场景 pass 与收尾 resolve 的视图），按输出格式缓存全屏 tone-map pipeline；tone pass 的 6 个绑定里带三级光晕输入（关闭时绑场景纹理占位）；tone-map 输入由调用方给的视图决定（HDR 场景或 TAA 解析结果），`present(..., scene, format, Look { bloom, exposure }, glow)` 每帧建绑定组；tone-map 之后可选跑一趟 FXAA（`crates/xgc-render/src/fxaa.rs`，落点由调用方给的视图决定），TAA 开着时 FXAA 让位 |
 | `crates/xgc-render/src/bloom.rs` | 三级 HDR 光晕链（旧端 `postfx.rs` 同口径）：`BloomSettings`（intensity / threshold / knee，`intensity <= 0` 即关闭）+ 亮部提取 / 逐级降采样 / 横纵二项核共 9 个 pass，`Rgba16Float` 乒乓中间目标按尺寸缓存；`BloomStage::render` 收当前曝光（亮部提取按曝光后的亮度判阈值），链缓存键带曝光位模式 |
 | `crates/xgc-render/src/bloom.wgsl` | 光晕三个片元入口：`fs_bright`（软膝式取亮部）/ `fs_down`（一次双线性降采样）/ `fs_blur`（9 抽头二项核，方向由参数给横或纵） |
@@ -248,8 +247,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/src/compare_cmd.rs` | `xgc compare-headless` / `xgc image-diff <旧图> <新图> [阈值] [report]`；PNG / PPM 逐像素差异，`report` 追加余差归因 |
 | `crates/xgc-cli/src/audio.rs` | `xgc play <wav>`：解码后推默认音频设备 |
 | `crates/xgc-cli/src/input_cmd.rs` | `xgc input <input.ron>`：校验并列出动作 / 轴 |
-| `crates/xgc-cli/src/render.rs` | `render-frame <世界> <PPM> [资产根] [宽] [高] [帧数]`；缺省 0 帧，最终重算层级 / UI；曝光、天空、光晕、阴影画质与 FXAA 设置由 `project_render.rs` 从项目级 `project.ron` 读出后灌进 `Renderer` |
-| `crates/xgc-cli/src/project_render.rs` | `project.ron` 画面设置投影：`render.exposure` / `render.sky` / `render.bloom` / `render.fxaa` / `render.shadow`；缺文件 / 缺节一律落回旧端缺省（曝光 1.0、其余关闭态），缺省值必须逐项等于 `RenderConfig` 的曝光 1.0 与 `SkyConfig` / `BloomConfig` / `FxaaConfig` / `ShadowConfig` 的 `default` |
+| `crates/xgc-cli/src/render.rs` | `render-frame <世界> <PPM> [资产根] [宽] [高] [帧数]`，缺省 0 帧，最终重算层级和 UI。与窗口共用 `Renderer::apply_project_settings`，设置来自原生清单或已验证的 cooked 清单 |
+| `crates/xgc-cli/src/project_render.rs` | 对比旧项目截图时，通过迁移入口只读 `project.ron` 的画面设置 |
 | `crates/xgc-xtask/src/main.rs` | `xtask check` / `size` / `deps` / `schema` |
 | `.github/workflows/xgc.yml` | XGC CI：`check`（fmt / clippy / xtask / CLI 冒烟）+ `test`（12 个不碰 GPU 的包 + 14 个 CPU-only render 目标 + release 基线）；toolchain 钉 1.95.0 |
 

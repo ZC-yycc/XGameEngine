@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use crate::camera::Mat4;
 use crate::gpu::GpuContext;
-use crate::taa::{jitter_projection, jitter_to_ndc, ResolveInput, TaaSettings, TaaStage};
+use crate::taa::{jitter_projection, jitter_to_ndc, ResolveInput, TaaStage};
+use crate::TaaSettings;
 
 /// 一帧的两套视图投影：场景用抖动后的（TAA），阴影拟合必须用未抖动的。
 #[derive(Clone, Copy)]
@@ -114,8 +115,8 @@ mod tests {
     use crate::assets::MeshCache;
     use crate::camera::IDENTITY;
     use crate::gpu::GpuContext;
-    use crate::taa::TaaSettings;
     use crate::Renderer;
+    use crate::TaaSettings;
 
     /// 接线判据：开着时返回**抖动后**的投影，且每帧相位不同；关着时原样返回。
     /// （像素级只能看"历史有没有混"，抖动是否真的接进场景矩阵要靠这条钉住。）

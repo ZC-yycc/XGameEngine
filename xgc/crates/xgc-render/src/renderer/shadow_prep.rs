@@ -10,6 +10,7 @@ use crate::draw::DrawItem;
 use crate::gpu::{GpuContext, GpuError};
 use crate::point_shadow::{self, PointShadow};
 use crate::shadow::ShadowCascades;
+use xgc_base::render_settings::shadow_map_sizes;
 use xgc_world::World;
 
 /// 一帧的阴影准备结果：方向光级联与点光立方体阴影互相独立（可以只有一种）。
@@ -58,9 +59,6 @@ impl super::Renderer {
                 ));
             }
         }
-        if self.shadow.is_none() {
-            self.shadow = Some(crate::shadow::ShadowTarget::new(context));
-        }
         if self.textures.is_none() {
             self.textures = Some(crate::texture_bind::TextureBinding::new(context));
         }
@@ -79,12 +77,18 @@ impl super::Renderer {
         cascade_blend: f32,
     ) -> Result<PreparedShadows, GpuError> {
         let environment = world.environment();
-        // 点光阴影与相机无关：只认第一盏 casts_shadow 且 range > 0 的点光（旧端同判据）。
-        let point = point_shadow::pick_light(environment).map(point_shadow::plan);
-        let mut prepared = PreparedShadows::none(point);
-        // 主阴影光与 `lights::pack` 用同一判据：只有它会在着色里带 `shadow_params.x = 1`。
-        // 分别扫环境表会漏掉"主阴影光排在第 9 盏之后"的情形，白跑一次级联深度 pass。
-        if let Some(light) = crate::lights::primary_shadow_light(environment) {
+        let sun = crate::lights::primary_shadow_light(environment);
+        let point = point_shadow::pick_light(environment);
+        let sizes = shadow_map_sizes(
+            self.shadow_resolution,
+            sun.map_or(0, |light| light.shadow_resolution),
+            point.map_or(0, |light| light.shadow_resolution),
+            context.device().limits().max_texture_dimension_2d,
+        );
+        let mut prepared =
+            PreparedShadows::none(point.map(|light| point_shadow::plan(light, sizes[1])));
+        // 拟合需使用实际纹理尺寸，否则纹素吸附与采样会对不上。
+        if let Some(light) = sun {
             if let Some(bounds) = crate::shot::scene_bounds(world, &mut self.meshes)
                 .map_err(|err| GpuError::Mesh(err.to_string()))?
             {
@@ -94,7 +98,7 @@ impl super::Renderer {
                         camera_pos,
                         light.normalized_direction(),
                         &bounds,
-                        crate::shadow::SHADOW_RESOLUTION,
+                        sizes[0],
                         crate::shadow::SHADOW_CASCADES,
                         // 级间混合开着时每级（非第 0 级）近端要多铺一段，切分前的混合带
                         // 才在两级里都采得到；0 = 老拟合，逐位一致。
@@ -103,16 +107,31 @@ impl super::Renderer {
                 }
             }
         }
+        // 暂无投影时保留已分配的尺寸。首帧没有投影只需 1×1，占位即可满足固定绑定布局。
+        let previous = self
+            .shadow
+            .as_ref()
+            .map_or([1; 2], crate::shadow::ShadowTarget::sizes);
+        let sizes = [
+            if prepared.cascades.is_some() {
+                sizes[0]
+            } else {
+                previous[0]
+            },
+            if prepared.point.is_some() {
+                sizes[1]
+            } else {
+                previous[1]
+            },
+        ];
+        let target = self
+            .shadow
+            .get_or_insert_with(|| crate::shadow::ShadowTarget::new(context, sizes));
+        target.ensure_sizes(context, sizes);
         if prepared.cascades.is_none() && prepared.point.is_none() {
             return Ok(prepared);
         }
-        if self.textures.is_none() {
-            self.textures = Some(crate::texture_bind::TextureBinding::new(context));
-        }
         // 蒙皮投射体的 palette / model 并进阴影自己的竞技场，所以这里要可变的 target。
-        let Some(target) = self.shadow.as_mut() else {
-            return Ok(prepared);
-        };
         let mut sources = crate::shadow_skin::CasterSources {
             meshes: &mut self.meshes,
             gpu_meshes: &mut self.gpu_meshes,

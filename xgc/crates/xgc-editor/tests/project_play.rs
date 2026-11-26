@@ -73,6 +73,8 @@ end
         },
         search_paths: Vec::new(),
         input: Some("./Config\\controls.ron".into()),
+        render: Default::default(),
+        quality: Default::default(),
     };
     save_project(&manifest_path, &manifest).unwrap();
 

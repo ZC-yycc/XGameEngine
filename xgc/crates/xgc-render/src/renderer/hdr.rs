@@ -7,13 +7,13 @@
 
 use std::sync::Arc;
 
-use crate::bloom::{BloomSettings, BLOOM_LEVELS, BLOOM_WEIGHTS};
+use crate::bloom::{BLOOM_LEVELS, BLOOM_WEIGHTS};
 use crate::gpu::GpuContext;
+use crate::{BloomSettings, FxaaSettings, ToneMapMode};
 
 const TONE_MAP_WGSL: &str = include_str!("../tone_map.wgsl");
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// `[exposure, intensity, w0, w1, w2, _pad…]`，与 `tone_map.wgsl` 的
-/// `ToneParams` 逐字段对齐（整块 32 字节：末尾 3 个填充）。
+/// 曝光、光晕强度、三级权重和曲线开关，与 `ToneParams` 的 32 字节布局一致。
 const TONE_PARAMS_BYTES: usize = 32;
 
 struct HdrTarget {
@@ -38,14 +38,15 @@ pub(super) struct SceneViews {
 pub(super) struct Look {
     pub(super) bloom: BloomSettings,
     pub(super) exposure: f32,
+    pub(super) tone_map: ToneMapMode,
 }
 
 pub(super) struct HdrStage {
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     tone_params: wgpu::Buffer,
-    /// 上次写进 `tone_params` 的五个字段（按位比较，避免每帧都写缓冲）。
-    tone_params_written: Option<[u32; 5]>,
+    /// 按位比较曝光、光晕与曲线配置，避免重复写缓冲。
+    tone_params_written: Option<[u32; 6]>,
     target: Option<HdrTarget>,
     pipeline: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
 }
@@ -253,7 +254,11 @@ impl HdrStage {
         look: Look,
         glow: Option<[&wgpu::TextureView; BLOOM_LEVELS]>,
     ) {
-        let Look { bloom, exposure } = look;
+        let Look {
+            bloom,
+            exposure,
+            tone_map,
+        } = look;
         if self
             .pipeline
             .as_ref()
@@ -262,17 +267,17 @@ impl HdrStage {
             self.pipeline = Some((format, self.create_pipeline(context, format)));
         }
         let pipeline = &self.pipeline.as_ref().unwrap().1;
-        let values = [
-            exposure,
-            bloom.intensity,
-            BLOOM_WEIGHTS[0],
-            BLOOM_WEIGHTS[1],
-            BLOOM_WEIGHTS[2],
+        let bits = [
+            exposure.to_bits(),
+            bloom.intensity.to_bits(),
+            BLOOM_WEIGHTS[0].to_bits(),
+            BLOOM_WEIGHTS[1].to_bits(),
+            BLOOM_WEIGHTS[2].to_bits(),
+            u32::from(tone_map == ToneMapMode::Off),
         ];
-        let bits = values.map(f32::to_bits);
         if self.tone_params_written != Some(bits) {
             let mut bytes = [0u8; TONE_PARAMS_BYTES];
-            for (slot, value) in values.iter().enumerate() {
+            for (slot, value) in bits.iter().enumerate() {
                 bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
             }
             context.queue().write_buffer(&self.tone_params, 0, &bytes);
@@ -462,7 +467,7 @@ impl super::Renderer {
         let format = output.format();
         // 旧端纪律：开着 TAA 时 FXAA 让位（显示空间只保留一种抗锯齿）。
         let fxaa = if self.taa.enabled {
-            crate::fxaa::FxaaSettings::default()
+            FxaaSettings::default()
         } else {
             self.fxaa
         };
@@ -494,7 +499,11 @@ impl super::Renderer {
                 &tone_view,
                 &scene_view,
                 format,
-                Look { bloom, exposure },
+                Look {
+                    bloom,
+                    exposure,
+                    tone_map: self.tone_map,
+                },
                 glow,
             );
         stats.passes += 1;
@@ -521,9 +530,9 @@ mod tests {
     use xgc_world::World;
 
     use crate::assets::MeshCache;
-    use crate::bloom::BloomSettings;
     use crate::gpu::{GpuContext, GpuResource};
     use crate::resources::{ResourceDesc, ResourceUsage};
+    use crate::BloomSettings;
     use crate::Renderer;
 
     /// 集成用例只能看像素：关掉光晕后画面照样对，但链留着白占显存。

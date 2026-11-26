@@ -18,12 +18,6 @@ use xgc_world::{LightKind, SceneEnvironment, SceneLight};
 /// 立方体面数：+X / −X / +Y / −Y / +Z / −Z。
 pub(crate) const POINT_SHADOW_FACES: usize = 6;
 
-/// 立方体边长：旧端是方向光阴影分辨率的一半（缺省 2048 / 2）。
-///
-/// 固定值而不是按灯配置：主着色器的 `step = 2 / resolution` 必须与实际纹理一致，
-/// 运行期改尺寸要重建纹理与绑定，收益不足以抵消复杂度（记在 STATUS 的未闭环里）。
-pub(crate) const POINT_SHADOW_RESOLUTION: u32 = 1024;
-
 /// 采样比较偏置：旧端 `POINT_SHADOW_DEPTH_BIAS`。
 pub(crate) const POINT_SHADOW_DEPTH_BIAS: f32 = 0.0035;
 
@@ -44,6 +38,7 @@ pub(crate) struct PointShadow {
     light_position: [f32; 3],
     near: f32,
     far: f32,
+    resolution: u32,
 }
 
 impl PointShadow {
@@ -62,7 +57,7 @@ impl PointShadow {
         // w = 比较偏置。
         for value in [
             self.near,
-            2.0 / POINT_SHADOW_RESOLUTION as f32,
+            2.0 / self.resolution as f32,
             1.0,
             POINT_SHADOW_DEPTH_BIAS,
         ] {
@@ -97,7 +92,7 @@ pub(crate) fn pick_light(environment: &SceneEnvironment) -> Option<&SceneLight> 
 }
 
 /// 由灯参数推出六面矩阵与近远平面（旧端 `render` 里的每帧准备同式）。
-pub(crate) fn plan(light: &SceneLight) -> PointShadow {
+pub(crate) fn plan(light: &SceneLight, resolution: u32) -> PointShadow {
     let far = if light.range.is_finite() {
         light.range.max(0.05)
     } else {
@@ -109,6 +104,7 @@ pub(crate) fn plan(light: &SceneLight) -> PointShadow {
         light_position: light.position,
         near,
         far,
+        resolution,
     }
 }
 
@@ -201,13 +197,13 @@ pub(crate) struct PointShadowTarget {
 }
 
 impl PointShadowTarget {
-    pub(crate) fn new(context: &GpuContext) -> Self {
+    pub(crate) fn new(context: &GpuContext, resolution: u32) -> Self {
         let device = context.device();
         let map = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("xgc-point-shadow-map"),
             size: wgpu::Extent3d {
-                width: POINT_SHADOW_RESOLUTION,
-                height: POINT_SHADOW_RESOLUTION,
+                width: resolution,
+                height: resolution,
                 depth_or_array_layers: POINT_SHADOW_FACES as u32,
             },
             mip_level_count: 1,
@@ -508,6 +504,11 @@ mod tests {
         environment.lights.push(on);
         let picked = pick_light(&environment).expect("第二盏点光投射阴影");
         assert_eq!(picked.position, [2.0, 1.0, 0.0]);
-        assert_eq!(plan(picked).uniform_bytes().len() as u64, 32);
+        let uniforms = plan(picked, 512).uniform_bytes();
+        assert_eq!(uniforms.len() as u64, 32);
+        assert_eq!(
+            f32::from_le_bytes(uniforms[20..24].try_into().unwrap()),
+            2.0 / 512.0
+        );
     }
 }

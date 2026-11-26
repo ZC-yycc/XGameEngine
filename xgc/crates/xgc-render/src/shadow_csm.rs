@@ -6,8 +6,7 @@
 use super::camera::{look_at_rh, mul, orthographic_rh, Mat4};
 use super::shot::Bounds;
 
-/// 阴影图边长：与旧引擎 `DEFAULT_SHADOW_RESOLUTION` 一致。
-pub const SHADOW_RESOLUTION: u32 = 2048;
+pub use xgc_base::render_settings::DEFAULT_SHADOW_RESOLUTION as SHADOW_RESOLUTION;
 /// 接收端深度偏置（NDC 深度单位），旧引擎同名常量。
 pub const SHADOW_DEPTH_BIAS: f32 = 0.0022;
 /// 拟合半径上限：防止"有物体飞出视野"把深度精度吃光。

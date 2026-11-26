@@ -122,15 +122,20 @@ impl EditorApp {
                 render_state.renderer.write().free_texture(&old.id);
                 (old.renderer, old.context)
             }
-            None => (
-                Renderer::new(self.viewport_meshes()),
-                GpuContext::from_arc(
+            None => {
+                let context = GpuContext::from_arc(
                     render_state.device.clone(),
                     render_state.queue.clone(),
                     render_state.adapter.get_info(),
                     xgc_render::preferred_sample_count(&render_state.adapter),
-                ),
-            ),
+                );
+                let mut renderer = Renderer::new(self.viewport_meshes());
+                if let Some(project) = &self.state.project {
+                    let manifest = project.manifest();
+                    renderer.apply_project_settings(&context, manifest.render, manifest.quality);
+                }
+                (renderer, context)
+            }
         };
         let texture = context.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("xgc-editor-viewport"),

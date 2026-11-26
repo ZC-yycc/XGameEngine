@@ -1,16 +1,44 @@
-//! 画面设置入口：把 `project.ron` 读出来的各节容错后灌进 `Renderer`。
-//!
-//! 这些 setter 单独成文件是为了让 `renderer.rs` 守住单文件软上限；它们只碰字段、
-//! 不参与渲染流程，读代码时可以先跳过。每个 setter 的"为什么"写在各自 doc 里。
+//! 各宿主通过同一入口把项目设置交给渲染器。
 
-use crate::bloom::BloomSettings;
-use crate::exposure::sanitize_exposure;
-use crate::fxaa::FxaaSettings;
-use crate::shadow_settings::ShadowSettings;
-use crate::sky::SkySettings;
-use crate::taa::TaaSettings;
+use crate::{
+    sanitize_exposure, BloomSettings, FxaaSettings, GpuContext, RenderQuality, RenderSettings,
+    ShadowSettings, SkySettings, SsaoSettings, TaaSettings,
+};
 
 impl super::Renderer {
+    pub fn apply_project_settings(
+        &mut self,
+        context: &GpuContext,
+        render: RenderSettings,
+        quality: RenderQuality,
+    ) {
+        let render = render.sanitized();
+        let quality = quality.resolve(context.scene_sample_count());
+        self.set_sample_count(quality.msaa);
+        self.shadow_resolution = quality.shadow_resolution;
+        self.lod_bias = render.lod_bias * quality.lod_scale;
+        self.exposure = render.exposure;
+        self.tone_map = render.tone_map;
+        self.sky = render.sky;
+        self.bloom = render.bloom;
+        self.fxaa = render.fxaa;
+        self.shadow_settings = render.shadow;
+        self.taa = render.taa;
+        self.ssao = render.ssao;
+    }
+
+    pub(super) fn scene_clear_color(&self) -> wgpu::Color {
+        if self.sky.enabled {
+            let [r, g, b] = self
+                .sky
+                .horizon
+                .map(|value| f64::from(value * self.sky.intensity));
+            wgpu::Color { r, g, b, a: 1.0 }
+        } else {
+            self.clear_color
+        }
+    }
+
     /// 设置乘到各级距离上的倍率（包含质量档位的缩放）。非正值固定使用首个可用级。
     pub fn set_lod_bias(&mut self, bias: f32) {
         self.lod_bias = bias;
@@ -64,7 +92,7 @@ impl super::Renderer {
     }
 
     /// SSAO 只看 `enabled` 与 `strength > 0`：强度 0 与关掉等价（省四趟 pass）。
-    pub fn set_ssao(&mut self, settings: crate::ssao::SsaoSettings) {
+    pub fn set_ssao(&mut self, settings: SsaoSettings) {
         self.ssao = settings.sanitized();
     }
 }

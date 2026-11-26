@@ -12,7 +12,8 @@
 //! - 天空设置（`SkyUniform` 的 80 字节）变了才重建，靠 FNV-1a 字节哈希比较。
 
 use super::gpu::GpuContext;
-use super::sky::{SkySettings, SkyUniform};
+use super::sky::SkyUniform;
+use crate::SkySettings;
 
 /// 预过滤立方体的级数（含第 0 级）。
 pub(crate) const ENV_MIPS: u32 = 5;

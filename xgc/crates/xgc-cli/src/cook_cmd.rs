@@ -10,16 +10,10 @@ use xgc_host::{asset_paths, ScriptedRunner};
 use xgc_store::{load_world, load_world_binary, save_world, save_world_binary};
 use xgc_world::{builtin_registry, World, WorldData};
 
-use crate::runtime_cmd::load_native_project;
+use crate::runtime_cmd::load_native_runtime;
 
 fn cook_runtime(root: &Path) -> Result<CookRuntime, String> {
-    Ok(match load_native_project(root)? {
-        Some(project) => CookRuntime {
-            search_paths: project.search_paths,
-            input: project.input,
-        },
-        None => CookRuntime::standalone(root),
-    })
+    Ok(load_native_runtime(root)?.unwrap_or_else(|| CookRuntime::standalone(root)))
 }
 
 pub fn cook(root: Option<&str>, out: Option<&str>) -> ExitCode {

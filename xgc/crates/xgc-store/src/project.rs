@@ -1,6 +1,6 @@
 //! 项目清单 `project.xgc`：迁移产物与三个宿主的共同入口。
 //!
-//! 这里只放**项目级**信息：入口场景、关卡顺序、内容目录、输入映射。单个场景
+//! 这里只放**项目级**信息：入口场景、关卡顺序、内容目录、输入映射和画面设置。单个场景
 //! 仍是 `scenes/*.json` 的 `WorldData`，两者各自版本化；清单不重复场景内容。
 //!
 //! 路径一律是项目相对路径（正斜杠），读写边界都走
@@ -10,13 +10,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use xgc_base::path::normalize_project_relative;
+use xgc_base::render_settings::{RenderQuality, RenderSettings};
 
 use crate::{load_world, write_atomic, Result, StoreError};
 
 /// 清单格式版本；新增必填字段必须同时上调。
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectManifest {
     pub format_version: u32,
     pub name: String,
@@ -30,6 +31,10 @@ pub struct ProjectManifest {
     /// 输入映射的项目相对路径；没有输入映射时为 None。
     #[serde(default)]
     pub input: Option<String>,
+    #[serde(default, skip_serializing_if = "RenderSettings::is_default")]
+    pub render: RenderSettings,
+    #[serde(default, skip_serializing_if = "RenderQuality::is_default")]
+    pub quality: RenderQuality,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

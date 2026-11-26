@@ -1,337 +1,23 @@
-//! `project.ron` 的画面设置读取，含 LOD 距离倍率和质量档位。
-//!
-//! 旧引擎把画面设置放在项目级而不是场景级，XGC 也按项目级读；缺省值必须逐项
-//! 等于旧端 `RenderConfig::default` 的曝光 1.0 与 `SkyConfig` / `BloomConfig` /
-//! `FxaaConfig` / `ShadowConfig` / `TaaConfig` 的 `default`，
-//! 缺文件 / 缺节时画面才与接入前逐位相同。
+//! 对照旧工程截图时，复用迁移的只读配置投影。
 
 use std::path::Path;
+use xgc_base::render_settings::{RenderQuality, RenderSettings};
 
-use serde::Deserialize;
-use xgc_render::{
-    sanitize_exposure, BloomSettings, FxaaSettings, ShadowSettings, SkySettings, SsaoSettings,
-    TaaSettings,
-};
-
-#[derive(Debug, Default, Deserialize)]
-struct OldProjectFile {
-    #[serde(default)]
-    render: OldProjectRender,
-    #[serde(default)]
-    quality: OldProjectQuality,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct OldProjectQuality {
-    preset: Option<QualityPreset>,
-    lod_scale: Option<f32>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-enum QualityPreset {
-    Low,
-    #[default]
-    Medium,
-    High,
-}
-
-impl OldProjectQuality {
-    fn lod_scale(self) -> f32 {
-        // 显式覆盖优先于预设。非有限值回退到预设，非正值仍用质量档的下界。
-        let base = match self.preset.unwrap_or_default() {
-            QualityPreset::Low => 0.6,
-            QualityPreset::Medium => 1.0,
-            QualityPreset::High => 1.25,
-        };
-        self.lod_scale
-            .filter(|scale| scale.is_finite())
-            .unwrap_or(base)
-            .clamp(0.05, 10.0)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct OldProjectRender {
-    #[serde(default = "exposure_default")]
-    exposure: f32,
-    #[serde(default = "lod_bias_default")]
-    lod_bias: f32,
-    #[serde(default)]
-    sky: OldSkyConfig,
-    #[serde(default)]
-    bloom: OldBloomConfig,
-    #[serde(default)]
-    fxaa: OldFxaaConfig,
-    #[serde(default)]
-    shadow: OldShadowConfig,
-    #[serde(default)]
-    taa: OldTaaConfig,
-    #[serde(default)]
-    ssao: OldSsaoConfig,
-}
-
-/// 缺 `render` 节时的缺省：曝光必须是旧端缺省 1.0，不能靠 `derive(Default)` 给出
-/// 的 0.0（那是"全黑画面"，绕开 `load_render` 直接读结构的人会踩到）。
-impl Default for OldProjectRender {
-    fn default() -> Self {
-        Self {
-            exposure: exposure_default(),
-            lod_bias: lod_bias_default(),
-            sky: OldSkyConfig::default(),
-            bloom: OldBloomConfig::default(),
-            fxaa: OldFxaaConfig::default(),
-            shadow: OldShadowConfig::default(),
-            taa: OldTaaConfig::default(),
-            ssao: OldSsaoConfig::default(),
-        }
-    }
-}
-
-fn exposure_default() -> f32 {
-    xgc_render::EXPOSURE_DEFAULT
-}
-
-fn lod_bias_default() -> f32 {
-    1.0
-}
-
-/// 缺省值必须逐项等于旧 `FxaaConfig::default`（抗锯齿默认关）。
-#[derive(Debug, Default, Deserialize)]
-struct OldFxaaConfig {
-    #[serde(default)]
-    enabled: bool,
-}
-
-/// 缺省值必须逐项等于旧 `BloomConfig::default`（光晕默认关）。
-#[derive(Debug, Deserialize)]
-struct OldBloomConfig {
-    #[serde(default)]
-    intensity: f32,
-    #[serde(default = "bloom_default_threshold")]
-    threshold: f32,
-    #[serde(default = "bloom_default_knee")]
-    knee: f32,
-}
-
-/// 缺省值必须逐项等于旧 `TaaConfig::default`（TAA 默认关，历史权重 0.9）。
-#[derive(Debug, Deserialize)]
-struct OldTaaConfig {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default = "taa_default_history_weight")]
-    history_weight: f32,
-}
-
-fn taa_default_history_weight() -> f32 {
-    xgc_render::DEFAULT_HISTORY_WEIGHT
-}
-
-/// 缺省值必须逐项等于旧 `SsaoConfig::default`（SSAO 默认关，强度 1 / 半径 0.5 / 偏置 0.025）。
-#[derive(Debug, Deserialize)]
-struct OldSsaoConfig {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default = "ssao_default_strength")]
-    strength: f32,
-    #[serde(default = "ssao_default_radius")]
-    radius: f32,
-    #[serde(default = "ssao_default_bias")]
-    bias: f32,
-}
-
-fn ssao_default_strength() -> f32 {
-    xgc_render::SsaoSettings::default().strength
-}
-
-fn ssao_default_radius() -> f32 {
-    xgc_render::SsaoSettings::default().radius
-}
-
-fn ssao_default_bias() -> f32 {
-    xgc_render::SsaoSettings::default().bias
-}
-
-impl Default for OldSsaoConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            strength: ssao_default_strength(),
-            radius: ssao_default_radius(),
-            bias: ssao_default_bias(),
-        }
-    }
-}
-
-impl Default for OldTaaConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            history_weight: taa_default_history_weight(),
-        }
-    }
-}
-
-/// 缺省值必须逐项等于旧 `ShadowConfig::default`（软阴影 / 级间混合都关）。
-#[derive(Debug, Default, Deserialize)]
-struct OldShadowConfig {
-    #[serde(default)]
-    softness: f32,
-    #[serde(default)]
-    cascade_blend: f32,
-}
-
-fn bloom_default_threshold() -> f32 {
-    1.0
-}
-
-fn bloom_default_knee() -> f32 {
-    0.6
-}
-
-impl Default for OldBloomConfig {
-    fn default() -> Self {
-        Self {
-            intensity: 0.0,
-            threshold: bloom_default_threshold(),
-            knee: bloom_default_knee(),
-        }
-    }
-}
-
-/// 缺省值必须逐项等于旧 `SkyConfig::default`（天空默认关）。
-#[derive(Debug, Deserialize)]
-struct OldSkyConfig {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default = "sky_default_intensity")]
-    intensity: f32,
-    #[serde(default = "sky_default_zenith")]
-    zenith: [f32; 3],
-    #[serde(default = "sky_default_horizon")]
-    horizon: [f32; 3],
-    #[serde(default = "sky_default_ground")]
-    ground: [f32; 3],
-    #[serde(default = "sky_default_sun_size")]
-    sun_size: f32,
-    #[serde(default = "sky_default_intensity")]
-    sun_intensity: f32,
-}
-
-fn sky_default_intensity() -> f32 {
-    1.0
-}
-
-fn sky_default_zenith() -> [f32; 3] {
-    [0.12, 0.28, 0.58]
-}
-
-fn sky_default_horizon() -> [f32; 3] {
-    [0.58, 0.68, 0.82]
-}
-
-fn sky_default_ground() -> [f32; 3] {
-    [0.16, 0.15, 0.14]
-}
-
-fn sky_default_sun_size() -> f32 {
-    1.5
-}
-
-impl Default for OldSkyConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            intensity: sky_default_intensity(),
-            zenith: sky_default_zenith(),
-            horizon: sky_default_horizon(),
-            ground: sky_default_ground(),
-            sun_size: sky_default_sun_size(),
-            sun_intensity: sky_default_intensity(),
-        }
-    }
-}
-
-/// CLI 截图与对表门禁共用的 `project.ron` 画面设置。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ProjectRenderSettings {
-    pub(crate) sky: SkySettings,
-    pub(crate) bloom: BloomSettings,
-    pub(crate) fxaa: FxaaSettings,
-    pub(crate) exposure: f32,
-    pub(crate) lod_bias: f32,
-    pub(crate) shadow: ShadowSettings,
-    pub(crate) taa: TaaSettings,
-    pub(crate) ssao: SsaoSettings,
-}
-
-/// 读 `project.ron` 的画面设置。缺文件返回 `None`，缺节使用旧端缺省。
-pub(crate) fn load_render(project_root: &Path) -> Option<ProjectRenderSettings> {
-    let path = project_root.join("project.ron");
-    let Ok(text) = std::fs::read_to_string(&path) else {
+pub(crate) fn load_legacy_render(root: &Path) -> Option<(RenderSettings, RenderQuality)> {
+    let path = root.join("project.ron");
+    if matches!(path.try_exists(), Ok(false)) {
         return None;
-    };
-    let project: OldProjectFile = match ron::from_str(&text) {
-        Ok(project) => project,
+    }
+    match xgc_migrate::read_old_render(root) {
+        Ok(settings) => Some(settings),
         Err(error) => {
-            // 文件在但读不懂：契约仍是"缺省即关"，但静默把天空和光晕一起关掉
-            // 会让画面差异无从归因，所以留一条能查的日志。
             eprintln!(
-                "warning: {} 解析失败，画面设置回落到缺省（曝光 1.0、天空 / 光晕 / FXAA / 阴影画质 / TAA / SSAO 都关）：{error}",
+                "warning: {} 读取画面设置失败，使用缺省值：{error}",
                 path.display()
             );
-            return None;
+            None
         }
-    };
-    let exposure = sanitize_exposure(project.render.exposure);
-    let sky = project.render.sky;
-    let bloom = project.render.bloom;
-    let fxaa = project.render.fxaa;
-    let shadow = project.render.shadow;
-    let taa = project.render.taa;
-    let ssao = project.render.ssao;
-    Some(ProjectRenderSettings {
-        sky: SkySettings {
-            enabled: sky.enabled,
-            intensity: sky.intensity,
-            zenith: sky.zenith,
-            horizon: sky.horizon,
-            ground: sky.ground,
-            sun_size: sky.sun_size,
-            sun_intensity: sky.sun_intensity,
-        }
-        .sanitized(),
-        bloom: BloomSettings {
-            intensity: bloom.intensity,
-            threshold: bloom.threshold,
-            knee: bloom.knee,
-        }
-        .sanitized(),
-        fxaa: FxaaSettings {
-            enabled: fxaa.enabled,
-        },
-        exposure,
-        lod_bias: project.render.lod_bias * project.quality.lod_scale(),
-        // 软阴影 / 级间混合都默认关；非有限 / 负值在消费边界落回关。
-        shadow: ShadowSettings {
-            softness: shadow.softness,
-            cascade_blend: shadow.cascade_blend,
-        }
-        .sanitized(),
-        // TAA 默认关；历史权重在这里夹进 [0, 0.98]，非有限值落回 0.9。
-        taa: TaaSettings {
-            enabled: taa.enabled,
-            history_weight: taa.history_weight,
-        }
-        .sanitized(),
-        // SSAO 默认关；非有限值落回该字段默认、有限值夹到旧端上限。
-        ssao: SsaoSettings {
-            enabled: ssao.enabled,
-            strength: ssao.strength,
-            radius: ssao.radius,
-            bias: ssao.bias,
-        }
-        .sanitized(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -343,7 +29,7 @@ mod tests {
             eprintln!("skip: 没有旧项目 project.ron");
             return;
         }
-        let settings = super::load_render(root).expect("showcase 项目应带 sky 节");
+        let (settings, _) = super::load_legacy_render(root).expect("showcase 项目应带 sky 节");
         let (sky, bloom, fxaa) = (settings.sky, settings.bloom, settings.fxaa);
         let exposure = settings.exposure;
         assert!(sky.enabled, "项目里天空是开着的");
@@ -372,19 +58,19 @@ mod tests {
         assert_eq!(settings.ssao, xgc_render::SsaoSettings::default());
         assert!(!settings.ssao.is_enabled());
         // 没有 project.ron 的资产根：天空关、光晕关。
-        assert!(super::load_render(std::path::Path::new("does-not-exist")).is_none());
+        assert!(super::load_legacy_render(std::path::Path::new("does-not-exist")).is_none());
     }
 
     #[test]
     fn parses_an_explicit_exposure_and_sanitizes_illegal_ones() {
         // 显式非 1.0 必须真的被解析出来：缺省值同样是 1.0，只断言"等于 1.0"
         // 分不清"解析接线"与"兜底"。
-        let explicit: super::OldProjectRender =
+        let explicit: xgc_render::RenderSettings =
             ron::from_str("(exposure: 2.5)").expect("显式曝光应能解析");
         assert_eq!(explicit.exposure, 2.5);
 
         // 0 / 负 / 非有限在旧端都是"非法曝光"，消费边界按 sanitize_exposure 回缺省。
-        let zero: super::OldProjectRender =
+        let zero: xgc_render::RenderSettings =
             ron::from_str("(exposure: 0.0)").expect("解析不该拒绝非法值");
         assert_eq!(
             xgc_render::sanitize_exposure(zero.exposure),
@@ -393,11 +79,7 @@ mod tests {
 
         // 缺 `render` 节时的缺省必须就是 1.0（derive(Default) 会给 0.0 = 全黑帧）。
         assert_eq!(
-            super::OldProjectRender::default().exposure,
-            xgc_render::EXPOSURE_DEFAULT
-        );
-        assert_eq!(
-            super::OldProjectFile::default().render.exposure,
+            xgc_render::RenderSettings::default().exposure,
             xgc_render::EXPOSURE_DEFAULT
         );
     }
@@ -431,13 +113,18 @@ mod tests {
             ),
         ] {
             std::fs::write(root.join("project.ron"), ron).expect("写临时 project.ron");
-            let settings = super::load_render(&root).expect("临时项目应能读出画面设置");
-            assert_eq!(settings.lod_bias, expected, "{ron}");
+            let (settings, quality) =
+                super::load_legacy_render(&root).expect("临时项目应能读出画面设置");
+            assert_eq!(
+                settings.lod_bias * quality.resolve(4).lod_scale,
+                expected,
+                "{ron}"
+            );
         }
         std::fs::remove_dir_all(root).expect("清理临时项目目录");
     }
 
-    /// 阴影节走真实入口 `load_render`（而不是「先反序列化、再本地消毒」）：将来漏接
+    /// 阴影节走真实入口 `load_legacy_render`（而不是「先反序列化、再本地消毒」）：将来漏接
     /// `shadow` 字段时这条会红；「缺节 = 关」也由同一入口给出判据。
     #[test]
     fn reads_the_shadow_sections_through_the_project_entry() {
@@ -450,7 +137,7 @@ mod tests {
         };
 
         write("(render: (shadow: (softness: 0.5, cascade_blend: 0.05)))");
-        let settings = super::load_render(&root).expect("临时项目应能读出画面设置");
+        let (settings, _) = super::load_legacy_render(&root).expect("临时项目应能读出画面设置");
         assert_eq!(settings.shadow.softness, 0.5);
         assert_eq!(settings.shadow.cascade_blend, 0.05);
         assert!(settings.shadow.is_enabled());
@@ -462,35 +149,35 @@ mod tests {
 
         // 负数在入口消毒成 0；`cascade_blend: 2.0` 是合法值（旧端不夹上界），保留。
         write("(render: (shadow: (softness: -0.5, cascade_blend: 2.0)))");
-        let settings = super::load_render(&root).expect("垃圾值不该让解析失败");
+        let (settings, _) = super::load_legacy_render(&root).expect("垃圾值不该让解析失败");
         assert_eq!(settings.shadow.softness, 0.0);
         assert_eq!(settings.shadow.cascade_blend, 2.0);
 
         // 缺 `render.shadow` 节 = 关。
         write("(render: ())");
-        let settings = super::load_render(&root).expect("空 render 节应走缺省");
+        let (settings, _) = super::load_legacy_render(&root).expect("空 render 节应走缺省");
         assert_eq!(settings.shadow, xgc_render::ShadowSettings::default());
         assert!(!settings.shadow.is_enabled());
         assert!(!settings.taa.is_enabled());
 
         // 显式开 TAA：历史权重真的被读出来并夹进 [0, 0.98]。
         write("(render: (taa: (enabled: true, history_weight: 0.95)))");
-        let settings = super::load_render(&root).expect("显式 TAA 应能解析");
+        let (settings, _) = super::load_legacy_render(&root).expect("显式 TAA 应能解析");
         assert!(settings.taa.is_enabled());
         assert_eq!(settings.taa.history_weight, 0.95);
         write("(render: (taa: (enabled: true, history_weight: 3.0)))");
-        let settings = super::load_render(&root).expect("非法权重不该让解析失败");
+        let (settings, _) = super::load_legacy_render(&root).expect("非法权重不该让解析失败");
         assert_eq!(settings.taa.history_weight, xgc_render::MAX_HISTORY_WEIGHT);
 
         // 显式开 SSAO：三个画质旋钮都从入口读出来，非法值在消费边界消毒。
         write("(render: (ssao: (enabled: true, strength: 2.0, radius: 3.0, bias: 0.1)))");
-        let settings = super::load_render(&root).expect("显式 SSAO 应能解析");
+        let (settings, _) = super::load_legacy_render(&root).expect("显式 SSAO 应能解析");
         assert!(settings.ssao.is_enabled());
         assert_eq!(settings.ssao.strength, 2.0);
         assert_eq!(settings.ssao.radius, 3.0);
         assert_eq!(settings.ssao.bias, 0.1);
         write("(render: (ssao: (enabled: true, strength: 9.0, radius: 99.0, bias: 9.0)))");
-        let settings = super::load_render(&root).expect("超上限不该让解析失败");
+        let (settings, _) = super::load_legacy_render(&root).expect("超上限不该让解析失败");
         assert_eq!(
             settings.ssao.strength,
             xgc_render::SsaoSettings::MAX_STRENGTH
@@ -499,7 +186,7 @@ mod tests {
         assert_eq!(settings.ssao.bias, xgc_render::SsaoSettings::MAX_BIAS);
         // 缺节 = 关（强度仍保留旧端默认值）。
         write("(render: ())");
-        let settings = super::load_render(&root).expect("空 render 节应走缺省");
+        let (settings, _) = super::load_legacy_render(&root).expect("空 render 节应走缺省");
         assert_eq!(settings.ssao, xgc_render::SsaoSettings::default());
 
         let _ = std::fs::remove_dir_all(&root);

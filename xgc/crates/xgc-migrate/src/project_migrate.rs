@@ -303,6 +303,8 @@ fn plan_project(root: &Path, project: &OldProject) -> Result<Plan, ProjectMigrat
             scripts: normalize(&project.content.scripts_dir)?,
         },
         search_paths,
+        render: project.render.sanitized(),
+        quality: project.quality.sanitized(),
         input: root
             .join("input.ron")
             .is_file()

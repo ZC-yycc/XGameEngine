@@ -182,6 +182,8 @@ fn selects_a_named_scene_from_the_project_manifest() {
             },
             search_paths: vec!["Shared".into()],
             input: None,
+            render: Default::default(),
+            quality: Default::default(),
         },
     )
     .unwrap();

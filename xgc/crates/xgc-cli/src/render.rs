@@ -10,8 +10,8 @@ use xgc_sim::{HierarchySystem, System, UiLayoutSystem};
 use xgc_store::load_world;
 use xgc_world::World;
 
-use crate::project_render::load_render;
-use crate::runtime_cmd::{advance_world_with_particles, load_search_paths};
+use crate::project_render::load_legacy_render;
+use crate::runtime_cmd::{advance_world_with_particles, load_runtime};
 
 fn parse_frame_count(value: Option<&str>) -> Result<u64, &'static str> {
     value
@@ -78,35 +78,23 @@ pub(crate) fn render_world_rgba(
         None => return Err("渲染目标不是纹理".to_string()),
     };
     let root = Path::new(assets_root.unwrap_or("."));
-    let search = SearchPaths::new(&load_search_paths(root)?);
+    let runtime = load_runtime(root)?;
+    let search = runtime
+        .as_ref()
+        .map_or_else(SearchPaths::default, |runtime| {
+            SearchPaths::new(&runtime.search_paths)
+        });
+    let settings = runtime
+        .as_ref()
+        .map(|runtime| (runtime.render, runtime.quality))
+        .or_else(|| load_legacy_render(root))
+        .unwrap_or_default();
     let catalog = scan_assets(root).map_err(|err| format!("扫描资产失败：{err}"))?;
     let meshes = MeshCache::with_assets(AssetPaths::new(root, search, Some(catalog)));
     let mut renderer = Renderer::new(meshes);
     renderer.set_particles(particles);
     renderer.set_clear_color([0.62, 0.72, 0.84, 1.0]);
-    // 天空开着的项目：背景取地平线色（旧端天空盒在地平线附近就是它），
-    // 环境照明由渲染器从同一份解析天空投影出来。
-    if let Some(settings) = load_render(root) {
-        if settings.sky.enabled {
-            let [r, g, b] = settings
-                .sky
-                .horizon
-                .map(|channel| channel * settings.sky.intensity);
-            renderer.set_clear_color([f64::from(r), f64::from(g), f64::from(b), 1.0]);
-        }
-        renderer.set_sky(settings.sky);
-        renderer.set_lod_bias(settings.lod_bias);
-        // 曝光缺省 1.0；光晕默认关（旧端 `render.bloom` 省略时 intensity = 0）。
-        renderer.set_exposure(settings.exposure);
-        renderer.set_bloom(settings.bloom);
-        renderer.set_fxaa(settings.fxaa);
-        // 软阴影 / 级间混合默认关：关着时着色器走老路径，帧输出逐字节不变。
-        renderer.set_shadow_settings(settings.shadow);
-        // TAA 默认关：关着时不建历史、相机不抖动，帧输出逐字节不变。
-        renderer.set_taa(settings.taa);
-        // SSAO 默认关：关着时不建 AO 纹理、不跑 pass，帧输出逐字节不变。
-        renderer.set_ssao(settings.ssao);
-    }
+    renderer.apply_project_settings(context, settings.0, settings.1);
     if std::env::var_os("XGC_DEBUG_DRAWS").is_some() {
         for item in build_draw_list(world).items {
             eprintln!(

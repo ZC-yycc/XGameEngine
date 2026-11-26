@@ -36,7 +36,8 @@ mod transform_migrate;
 mod verify;
 pub use compare::{compare_headless, CompareReport, Stats};
 pub use project_check::{
-    check_old_project, ProjectCheckError, ProjectCheckReport, OLD_PROJECT_FORMAT_VERSION,
+    check_old_project, read_old_render, ProjectCheckError, ProjectCheckReport,
+    OLD_PROJECT_FORMAT_VERSION,
 };
 pub use project_migrate::{migrate_old_project, ProjectMigrationError, ProjectMigrationReport};
 pub use report::{MigrationBatch, MigrationError, MigrationReport};

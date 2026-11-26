@@ -357,6 +357,8 @@ fn manifest(root: &Path) -> ProjectManifest {
         },
         search_paths: Vec::new(),
         input: Some("Controls/input.ron".into()),
+        render: Default::default(),
+        quality: Default::default(),
     };
     save_project(&root.join("project.xgc"), &manifest).unwrap();
     manifest

@@ -7,8 +7,8 @@
 use std::sync::{Mutex, MutexGuard};
 
 use xgc_render::{
-    aces_u8, BloomSettings, GpuContext, GpuResource, MeshCache, Renderer, ResourceDesc,
-    ResourceUsage,
+    aces_u8, BloomSettings, GpuContext, GpuResource, MeshCache, RenderQuality, RenderSettings,
+    Renderer, ResourceDesc, ResourceUsage, ToneMapMode,
 };
 use xgc_world::World;
 
@@ -144,6 +144,46 @@ fn doubling_exposure_brightens_the_linear_scene() {
         "曝光 2.0 的中心像素应对上 ACES(0.4)：实际 {}，期望 {want}",
         bright.pixels[b]
     );
+}
+
+#[test]
+fn project_tone_map_switch_preserves_exposure_and_clamps_hdr() {
+    let _gpu = gpu_lock();
+    let Ok(context) = GpuContext::headless() else {
+        eprintln!("skip: 没有可用 GPU 适配器");
+        return;
+    };
+    let world = World::new();
+    let mut renderer = Renderer::new(MeshCache::new("."));
+    renderer.set_clear_color([0.125, 0.375, 0.75, 1.0]);
+    let quality = RenderQuality {
+        msaa: Some(1),
+        ..Default::default()
+    };
+    let mut render = RenderSettings {
+        exposure: 2.0,
+        ..Default::default()
+    };
+    renderer.apply_project_settings(&context, render, quality);
+    let aces = shoot(&mut renderer, &context, &world, 8, 8);
+    let offset = center(&aces);
+    for (actual, expected) in aces.pixels[offset..][..3]
+        .iter()
+        .zip(aces_u8([0.25, 0.75, 1.5]))
+    {
+        assert!(actual.abs_diff(expected) <= 1);
+    }
+
+    render.tone_map = ToneMapMode::Off;
+    renderer.apply_project_settings(&context, render, quality);
+    let linear = shoot(&mut renderer, &context, &world, 8, 8);
+    assert_eq!(aces.passes, linear.passes);
+    assert_eq!(&linear.pixels[offset..][..4], &[64, 191, 255, 255]);
+
+    render.tone_map = ToneMapMode::Aces;
+    renderer.apply_project_settings(&context, render, quality);
+    let restored = shoot(&mut renderer, &context, &world, 8, 8);
+    assert_eq!(restored.pixels, aces.pixels);
 }
 
 #[test]

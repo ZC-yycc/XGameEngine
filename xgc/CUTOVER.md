@@ -66,6 +66,12 @@ HUD 图片按项目相对路径或 GUID 从同一资产目录读取。GPU 回归
 
 `pack` 在目标同级目录组包，回读 JSON 与 XGCB 世界并校验清单及文件哈希，然后持有父目录的长期锁发布。写入失败保留可运行的上一版，下一次打包会先根据目录和事务标记恢复上次中断。回归覆盖并发发布、三个中断边界和无归属目录保护。恢复验收使用预置目录状态，适用范围是本地文件系统上的协作发布。[发布回归](crates/xgc-cli/tests/cooked_publish.rs)
 
+## 项目画面设置
+
+迁移将旧项目的 `render` 和 `quality` 写进 `project.xgc`，组包时纳入 `cook.json` 签名。编辑器、播放器和 CLI 共用画面配置，覆盖曝光、色调映射、天空、光晕、FXAA、阴影软化、TAA、SSAO、LOD 偏置和画质档。MSAA 按设备能力选择 1× 或 4×。灯光显式设置的阴影分辨率优先，阴影采样与级联拟合使用实际附件尺寸。[画面设置](crates/xgc-base/src/render_settings.rs) · [GPU 曝光回归](crates/xgc-render/tests/exposure.rs)
+
+在 RTX 2060 Vulkan 610.88 上，同一场景以旧项目配置、迁移后的原生项目和 cooked 包各渲染一张 640×360 图，三张逐字节一致。showcase 的 151 个轨迹检查点及四张同机严格门禁图通过。四张图的总差异为 0.49%、1.07%、1.35%、1.54%，结构差异为 0.03%、0.08%、0.13%、0.26%。
+
 ## Agent 查询与重放
 
 `world.query` 按持久实体 ID 升序返回结果。继续翻页时将上一页的 `next_cursor` 填入 `cursor` 并沿用筛选条件。写事务或更换世界后旧游标失效。查询先筛选 ID，只为当前页读取投影字段或完整实体。对 1,000 和 12,000 实体的世界查询 200 行、每行 4 个字段，本机 Release 的 JSON-RPC 中位耗时分别为 1.917 和 2.323 毫秒，响应仍约 53 KB。[查询回归与测量](crates/xgc-agent/tests/query.rs)
@@ -96,7 +102,7 @@ glTF 的三次样条 TRS 轨道保留入切线、关键值和出切线。姿势�
 
 Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑时间和名称，并撤销修改。Agent 使用 `animation.animator:events[0].time` 查询，在 `edit.plan` 的组件字段中写 `events[0].time`。路径下标从 0 起。Lua `xgc.get` 返回的列表按 Lua 约定从 1 起，`xgc.set` 可以按零基路径改写叶字段。
 
-`render.lod → levels` 同样可以增删和逐项编辑。模型与最大距离分别是 `levels[0].model` 和 `levels[0].max_distance`，距离单位为米，零或负值代表无限距离。项目检查会报告具体层级的模型引用，打包会保留仅由 LOD 引用的相对路径和 GUID 资产。运行时按实体世界轴心到相机的距离选级，超出全部有限距离时主绘制、方向光和点光阴影一起跳过。取景和根运动使用首个可绘制模型。CLI 渲染和截图门禁读取旧项目 `render.lod_bias` 与画质档缩放。GPU 回归确认超距与移除实体逐像素相同，showcase 的 151 帧轨迹与同机四张严格截图通过。
+`render.lod → levels` 同样可以增删和逐项编辑。模型与最大距离分别是 `levels[0].model` 和 `levels[0].max_distance`，距离单位为米，零或负值代表无限距离。项目检查会报告具体层级的模型引用，打包会保留仅由 LOD 引用的相对路径和 GUID 资产。运行时按实体世界轴心到相机的距离选级，超出全部有限距离时主绘制、方向光和点光阴影一起跳过。取景和根运动使用首个可绘制模型。CLI、原生编辑器与播放器使用同一项目 LOD 偏置与画质档缩放。GPU 回归确认超距与移除实体逐像素相同，showcase 的 151 帧轨迹与同机四张严格截图通过。
 
 递归字段支持字符串键映射与带载荷的枚举。`settings["main.gain"].Scaled.factor` 先取映射中已有的键，再取当前 `Scaled` 分支的载荷。键按 JSON 字符串规则转义。Inspector 用增删条目或切换分支替换容器整值，切换时使用该分支的缺省载荷。Agent 通过同一字段路径读取和更新，事务可撤销。Lua `xgc.get` 将映射读成字符串键表，将枚举读成带 `variant` 和 `payload` 两键的表。
 

@@ -10,13 +10,8 @@
 //!
 //! 这一刀只做漫反射半球；镜面预过滤（GGX 重要性采样立方体）与天空盒 pass 留给后续。
 
-/// 天空整体强度上限：再亮整幅背景糊成纯白。
-pub const MAX_INTENSITY: f32 = 10.0;
-/// 太阳强度上限。
-pub const MAX_SUN_INTENSITY: f32 = 10.0;
-/// 太阳盘半径范围（度）。
-pub const MIN_SUN_SIZE: f32 = 0.1;
-pub const MAX_SUN_SIZE: f32 = 12.0;
+use xgc_base::render_settings::SkySettings;
+
 /// L2 实球谐系数个数。
 pub const SH_COEFFS: usize = 9;
 /// 球谐投影采样点数（斐波那契球，等权）。
@@ -25,65 +20,6 @@ const SH_SAMPLES: usize = 1024;
 const SH_CONVOLUTION: [f32; 3] = [1.0, 2.0 / 3.0, 0.25];
 const SUN_DISK_RADIANCE: f32 = 40.0;
 const SUN_GLOW: f32 = 0.35;
-
-/// 画面设置里的天空节（对应旧 `project.ron` 的 `render.sky`）。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SkySettings {
-    pub enabled: bool,
-    /// 整体强度乘子（0 = 天空全黑，等价于只有 ambient）。
-    pub intensity: f32,
-    pub zenith: [f32; 3],
-    /// 天空段与地面段在视线水平处**都**取它 —— 渐变在 `dir.y == 0` 处连续。
-    pub horizon: [f32; 3],
-    /// 镜头朝下看时的颜色。
-    pub ground: [f32; 3],
-    /// 太阳盘半径（度）。
-    pub sun_size: f32,
-    /// 太阳盘与光晕强度乘子；场景没有方向光时太阳整段不出现。
-    pub sun_intensity: f32,
-}
-
-impl Default for SkySettings {
-    /// 与旧 `SkyConfig::default` 一致：默认关、强度 1。关着时环境照明只剩 `ambient`，
-    /// 画面与天空上线前逐位相同。
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            intensity: 1.0,
-            zenith: [0.12, 0.28, 0.58],
-            horizon: [0.58, 0.68, 0.82],
-            ground: [0.16, 0.15, 0.14],
-            sun_size: 1.5,
-            sun_intensity: 1.0,
-        }
-    }
-}
-
-impl SkySettings {
-    /// 加载边界清洗：NaN / 无穷换缺省值，强度与太阳半径夹到安全范围。
-    pub fn sanitized(mut self) -> Self {
-        for color in [&mut self.zenith, &mut self.horizon, &mut self.ground] {
-            for channel in color.iter_mut() {
-                if !channel.is_finite() {
-                    *channel = 0.0;
-                }
-            }
-        }
-        if !self.intensity.is_finite() {
-            self.intensity = 1.0;
-        }
-        if !self.sun_intensity.is_finite() {
-            self.sun_intensity = 1.0;
-        }
-        if !self.sun_size.is_finite() {
-            self.sun_size = 1.5;
-        }
-        self.intensity = self.intensity.clamp(0.0, MAX_INTENSITY);
-        self.sun_intensity = self.sun_intensity.clamp(0.0, MAX_SUN_INTENSITY);
-        self.sun_size = self.sun_size.clamp(MIN_SUN_SIZE, MAX_SUN_SIZE);
-        self
-    }
-}
 
 /// 天空 uniform（与 WGSL 逐字节对齐；5 个 vec4 = 80 字节）。
 #[derive(Clone, Copy, Debug, PartialEq)]

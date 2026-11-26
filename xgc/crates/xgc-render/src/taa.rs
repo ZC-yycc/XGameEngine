@@ -13,6 +13,10 @@
 //!
 //! 乒乓用两块 `Rgba16Float`：同一张纹理不能既当输入又当输出。
 
+#[cfg(test)]
+use xgc_base::render_settings::DEFAULT_HISTORY_WEIGHT;
+use xgc_base::render_settings::{TaaSettings, MAX_HISTORY_WEIGHT};
+
 use std::sync::Arc;
 
 use super::camera::{invert, Mat4, IDENTITY};
@@ -23,57 +27,11 @@ const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// 抖动相位个数：旧端同为 8（Halton(2,3) 的前 8 项）。
 pub const JITTER_SAMPLES: u32 = 8;
-/// 历史权重上限。1.0 会把历史冻住（画面再也不更新），旧端同样在 0.98 封顶。
-pub const MAX_HISTORY_WEIGHT: f32 = 0.98;
-/// 历史权重的缺省值：本帧颜色只占 10%。
-pub const DEFAULT_HISTORY_WEIGHT: f32 = 0.9;
 /// 邻域钳制的放大量：1.0 = 恰好用当前帧 3×3 的最小 / 最大通道包住历史。
 const NEIGHBORHOOD_SCALE: f32 = 1.0;
 
 /// `TaaParams` 的字节数：两个 mat4 + 4 个 vec4 槽位（末尾按 16 字节对齐）。
 const PARAMS_BYTES: usize = 176;
-
-/// TAA 设置：与旧端 `TaaConfig` 逐字段、逐缺省值一致（落盘位置 `render.taa`）。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TaaSettings {
-    /// 总开关。缺省关：关着时整段跳过，画面逐位不变。
-    pub enabled: bool,
-    /// 历史权重（0 = 完全不用历史，0.98 = 几乎冻结）；只在已有可信上一帧时生效。
-    pub history_weight: f32,
-}
-
-impl Default for TaaSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            history_weight: DEFAULT_HISTORY_WEIGHT,
-        }
-    }
-}
-
-impl TaaSettings {
-    /// 容错读取（同旧端 `TaaConfig::sanitized`）：非有限权重落回缺省值，
-    /// 合法值夹进 `[0, 0.98]`。
-    pub fn sanitized(self) -> Self {
-        let history_weight = if self.history_weight.is_finite() {
-            self.history_weight.clamp(0.0, MAX_HISTORY_WEIGHT)
-        } else {
-            DEFAULT_HISTORY_WEIGHT
-        };
-        Self {
-            enabled: self.enabled,
-            history_weight,
-        }
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
 
 /// 反射式基数展开：`halton(1, 2) = 0.5`、`halton(2, 2) = 0.25`……
 pub(crate) fn halton(mut index: u32, base: u32) -> f32 {

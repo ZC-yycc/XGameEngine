@@ -123,6 +123,10 @@ impl ProjectCheckReport {
 #[derive(Debug, Deserialize)]
 pub(crate) struct OldProject {
     #[serde(default)]
+    pub(crate) render: xgc_base::render_settings::RenderSettings,
+    #[serde(default)]
+    pub(crate) quality: xgc_base::render_settings::RenderQuality,
+    #[serde(default)]
     pub(crate) format_version: u32,
     #[serde(default)]
     pub(crate) name: String,
@@ -214,6 +218,20 @@ pub(crate) fn read_old_project(root: &Path) -> Result<OldProject, ProjectCheckEr
         message: err.to_string(),
     })?;
     ron::from_str(&text).map_err(|err| ProjectCheckError::ProjectParse(err.to_string()))
+}
+
+/// 对照截图读取同一份旧项目投影；迁移后的宿主直接读 `project.xgc`。
+pub fn read_old_render(
+    root: &Path,
+) -> Result<
+    (
+        xgc_base::render_settings::RenderSettings,
+        xgc_base::render_settings::RenderQuality,
+    ),
+    ProjectCheckError,
+> {
+    let project = read_old_project(root)?;
+    Ok((project.render.sanitized(), project.quality.sanitized()))
 }
 
 /// 检查一个旧工程目录。只读；不创建 / 不修改任何文件。

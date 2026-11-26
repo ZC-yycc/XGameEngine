@@ -3,27 +3,39 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use xgc_asset::CookRuntime;
 use xgc_host::{asset_paths, ScriptedRunner};
-use xgc_store::{load_project, save_world, ProjectManifest, StoreError};
+use xgc_store::{load_project, save_world, StoreError};
 use xgc_world::World;
 
 use crate::world_cmd::{load_world_state, parse_frames};
 
 /// 单世界可以没有清单，存在清单时把读盘和格式错误交还给调用方。
-pub(crate) fn load_native_project(root: &Path) -> Result<Option<ProjectManifest>, String> {
+pub(crate) fn load_native_runtime(root: &Path) -> Result<Option<CookRuntime>, String> {
     match load_project(&root.join("project.xgc")) {
-        Ok(manifest) => Ok(Some(manifest)),
+        Ok(manifest) => Ok(Some(CookRuntime {
+            search_paths: manifest.search_paths,
+            input: manifest.input,
+            render: manifest.render,
+            quality: manifest.quality,
+        })),
         Err(StoreError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(format!("读取项目清单失败：{err}")),
     }
 }
 
-pub(crate) fn load_search_paths(root: &Path) -> Result<Vec<String>, String> {
-    Ok(load_native_project(root)?.map_or_else(Vec::new, |manifest| manifest.search_paths))
+pub(crate) fn load_runtime(root: &Path) -> Result<Option<CookRuntime>, String> {
+    if let Some(runtime) = load_native_runtime(root)? {
+        return Ok(Some(runtime));
+    }
+    xgc_asset::verify_manifest(root)
+        .map(|manifest| manifest.map(|manifest| manifest.runtime))
+        .map_err(|differences| format!("cooked 文件校验失败：{}", differences.join("；")))
 }
 
 pub(crate) fn scripted_runner(world: World, root: &Path) -> Result<ScriptedRunner, String> {
-    let assets = asset_paths(Some(root), &load_search_paths(root)?);
+    let search_paths = load_runtime(root)?.map_or_else(Vec::new, |runtime| runtime.search_paths);
+    let assets = asset_paths(Some(root), &search_paths);
     Ok(ScriptedRunner::with_assets(world, assets).0)
 }
 

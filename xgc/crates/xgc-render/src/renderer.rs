@@ -3,13 +3,12 @@
 use std::collections::HashMap;
 
 use super::assets::MeshCache;
-use super::bloom::{BloomSettings, BloomStage};
+use super::bloom::BloomStage;
 use super::camera::{camera_view_projection_with_eye, Mat4, IDENTITY};
 use super::draw::{build_draw_list_for_camera, DrawList};
-use super::exposure::EXPOSURE_DEFAULT;
 use super::frame_color::compose_colors;
 use super::frame_uniform::{create_frame_bind, FrameLighting, FrameTextures};
-use super::fxaa::{FxaaSettings, FxaaStage};
+use super::fxaa::FxaaStage;
 use super::gpu::{GpuContext, GpuError};
 use super::gpu_mesh::GpuMeshCache;
 use super::image::ImageData;
@@ -18,12 +17,13 @@ use super::pipeline::{RenderCache, TrianglePipeline};
 use super::texture::TexturePipeline;
 use xgc_world::World;
 
-use super::shadow_settings::ShadowSettings;
 use super::skinned::{supports_gpu_skin, GpuSkinMeshCache, SkinnedPipeline};
-use super::sky::{sky_irradiance, SkySettings};
-use super::ssao::SsaoSettings;
-use super::taa::TaaSettings;
+use super::sky::sky_irradiance;
 use scene_target::{DepthTarget, SceneTarget};
+use xgc_base::render_settings::{
+    BloomSettings, FxaaSettings, ShadowSettings, SkySettings, SsaoSettings, TaaSettings,
+    ToneMapMode, DEFAULT_SHADOW_RESOLUTION, EXPOSURE_DEFAULT,
+};
 mod hdr;
 mod scene_target;
 mod settings;
@@ -76,6 +76,8 @@ pub struct Renderer {
     lod_bias: f32,
     /// 画面设置里的曝光（`render.exposure`，缺省 1.0）：曲线前的线性光乘子。
     exposure: f32,
+    tone_map: ToneMapMode,
+    shadow_resolution: u32,
     /// 画面设置里的光晕节：开着时场景在 tone-map 前多跑一遍三级光晕链。
     bloom: BloomSettings,
     bloom_stage: Option<BloomStage>,
@@ -134,6 +136,8 @@ impl Renderer {
             sample_count: None,
             lod_bias: 1.0,
             exposure: EXPOSURE_DEFAULT,
+            tone_map: ToneMapMode::default(),
+            shadow_resolution: DEFAULT_SHADOW_RESOLUTION,
             bloom: BloomSettings::default(),
             bloom_stage: None,
             fxaa: FxaaSettings::default(),
@@ -337,7 +341,7 @@ impl Renderer {
             return Ok(0);
         };
         let quads = std::mem::take(&mut self.particles);
-        let clear = clear_target.then_some(self.clear_color);
+        let clear = clear_target.then(|| self.scene_clear_color());
         let request = super::particles::ParticleDrawRequest {
             view,
             depth,
@@ -366,6 +370,7 @@ impl Renderer {
             shadow: shadow_view_proj,
         } = cameras;
         self.ensure_frame_targets(context, target)?;
+        let clear_color = self.scene_clear_color();
         let views = self.hdr_scene_views(context, self.scene_sample_count(context));
         let format = target.format();
         let sample_count = views.sample_count;
@@ -450,7 +455,7 @@ impl Renderer {
             brdf_lut,
             env_sampler,
             depth,
-            clear_color: self.clear_color,
+            clear_color,
             textures,
         };
         let mut draw_calls = self.cache.draw_list_instanced(context, &mut request)?;
@@ -531,7 +536,7 @@ impl Renderer {
                         view: scene_view,
                         depth,
                         clear: draw_calls == 0,
-                        clear_color: self.clear_color,
+                        clear_color,
                         frame_bind: &frame_bind,
                         draws: &batch,
                     },

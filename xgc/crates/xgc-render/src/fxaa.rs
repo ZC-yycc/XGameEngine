@@ -18,22 +18,6 @@ const FXAA_WGSL: &str = include_str!("fxaa.wgsl");
 /// `[texel_x, texel_y, srgb, _pad]`，与 `fxaa.wgsl` 的 `FxaaParams` 逐字段对齐。
 const PARAMS_BYTES: usize = 16;
 
-/// 画面设置里的 FXAA 节：逐项对应旧端 `render.fxaa.enabled`。
-///
-/// 默认关：老项目 `project.ron` 里不会出现这一节；XGC 只读不写项目文件。
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct FxaaSettings {
-    /// 是否在 tone-map 之后跑一趟 FXAA。
-    pub enabled: bool,
-}
-
-impl FxaaSettings {
-    /// 这一帧要不要真的跑 FXAA。
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-}
-
 struct Scratch {
     width: u32,
     height: u32,

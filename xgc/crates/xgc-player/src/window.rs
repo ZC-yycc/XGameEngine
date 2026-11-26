@@ -8,7 +8,7 @@ use eframe::egui_wgpu::RenderState;
 use eframe::wgpu;
 use xgc_host::window::{fit_viewport, WindowInput};
 use xgc_host::{FixedStepClock, ScriptedRunner, WindowAudio};
-use xgc_render::{GpuContext, MeshCache, Renderer};
+use xgc_render::{GpuContext, MeshCache, RenderQuality, RenderSettings, Renderer};
 use xgc_sim::{InputMap, DEFAULT_UI_VIEWPORT};
 use xgc_world::World;
 
@@ -28,6 +28,7 @@ struct PlayerApp {
     last_update: Option<Instant>,
     failed: bool,
     meshes: Option<MeshCache>,
+    render_settings: (RenderSettings, RenderQuality),
     input_map: Option<InputMap>,
     input: WindowInput,
     audio: WindowAudio,
@@ -46,6 +47,7 @@ impl PlayerApp {
             last_update: None,
             failed: false,
             meshes: None,
+            render_settings: Default::default(),
             input_map: None,
             input: WindowInput::default(),
             audio: WindowAudio::default(),
@@ -88,6 +90,7 @@ impl PlayerApp {
             .map_err(|err| format!("恢复世界失败：{err}"))?;
         let (runner, meshes) = ScriptedRunner::with_assets(world, loaded.source.asset_paths());
         self.dir = loaded.source.root().to_path_buf();
+        self.render_settings = loaded.source.render_settings();
         self.input_map = input;
         self.meshes = Some(meshes);
         self.clock = Some(FixedStepClock::new(runner.fixed_dt()));
@@ -126,10 +129,13 @@ impl PlayerApp {
             &view,
             wgpu::FilterMode::Linear,
         );
+        let mut renderer = Renderer::new(meshes);
+        let (render, quality) = self.render_settings;
+        renderer.apply_project_settings(&context, render, quality);
         self.viewport = Some(Viewport {
             texture,
             id,
-            renderer: Renderer::new(meshes),
+            renderer,
             context,
         });
     }
@@ -312,10 +318,21 @@ mod tests {
             },
             search_paths: Vec::new(),
             input: Some("./Config\\controls.ron".into()),
+            render: RenderSettings {
+                exposure: 2.25,
+                ..Default::default()
+            },
+            quality: RenderQuality {
+                msaa: Some(1),
+                shadow_resolution: Some(1024),
+                ..Default::default()
+            },
         };
+        let render_settings = (manifest.render, manifest.quality);
         let play_one_frame = |path: &Path| {
             let mut app = PlayerApp::new(path, None);
             assert!(app.error.is_none(), "{:?}", app.error);
+            assert_eq!(app.render_settings, render_settings);
             let ctx = egui::Context::default();
             let _ = ctx.run(
                 egui::RawInput {
@@ -351,6 +368,8 @@ mod tests {
                 xgc_asset::CookRuntime {
                     search_paths: manifest.search_paths.clone(),
                     input: manifest.input.clone(),
+                    render: manifest.render,
+                    quality: manifest.quality,
                 },
                 None,
             )
