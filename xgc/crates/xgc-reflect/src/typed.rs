@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use xgc_base::EntityId;
 
-use crate::{FieldDescriptor, FieldType, Value};
+use crate::{FieldDescriptor, FieldType, Value, ValueProjection, ValueWriter};
 
 /// 派生按字段的 Rust 类型生成描述、读值和写值。容器递归复用其元素的投影。
 /// 写入先完整解码，再由调用方替换原字段。
@@ -18,11 +18,22 @@ pub trait ReflectValue: Sized {
 
     /// 与 `to_value().hash_into(hash)` 同序，可直接读取字段以免物化拥有型值。
     fn hash_into(&self, hash: &mut u64) {
-        self.to_value().hash_into(hash);
+        self.hash_projected(hash);
+    }
+
+    #[doc(hidden)]
+    fn project_value(&self, writer: &mut ValueWriter<'_>) {
+        writer.owned(self.to_value());
     }
 
     fn descriptor(name: &'static str, default: &Self) -> FieldDescriptor {
         FieldDescriptor::new(name, Self::field_type(), default.to_value())
+    }
+}
+
+impl<T: ReflectValue> ValueProjection for T {
+    fn project(&self, writer: &mut ValueWriter<'_>) {
+        self.project_value(writer);
     }
 }
 
@@ -85,8 +96,8 @@ impl ReflectValue for String {
             .ok_or_else(|| type_error("string", value))
     }
 
-    fn hash_into(&self, hash: &mut u64) {
-        Value::hash_string_into(self, hash);
+    fn project_value(&self, writer: &mut ValueWriter<'_>) {
+        writer.string(self);
     }
 }
 
@@ -96,7 +107,11 @@ impl<T: ReflectValue + Default> ReflectValue for Vec<T> {
     }
 
     fn to_value(&self) -> Value {
-        Value::List(self.iter().map(T::to_value).collect())
+        self.projected_value()
+    }
+
+    fn project_value(&self, writer: &mut ValueWriter<'_>) {
+        writer.list(self);
     }
 
     fn from_value(value: &Value) -> Result<Self, String> {
@@ -117,11 +132,11 @@ impl<T: ReflectValue + Default> ReflectValue for BTreeMap<String, T> {
     }
 
     fn to_value(&self) -> Value {
-        Value::Map(
-            self.iter()
-                .map(|(key, value)| (key.clone(), value.to_value()))
-                .collect(),
-        )
+        self.projected_value()
+    }
+
+    fn project_value(&self, writer: &mut ValueWriter<'_>) {
+        writer.map(self);
     }
 
     fn from_value(value: &Value) -> Result<Self, String> {

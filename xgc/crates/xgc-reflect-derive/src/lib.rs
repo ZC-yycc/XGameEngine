@@ -134,9 +134,11 @@ fn reflect_value(input: &DeriveInput) -> syn::Result<Tokens> {
     let ident = &input.ident;
     let descriptors = descriptors(&fields);
     let count = fields.len();
-    let reads = fields.iter().map(|field| {
-        let Field { ident, name, ty, .. } = field;
-        quote_spanned!(ty.span()=> (#name.into(), <#ty as ::xgc_reflect::ReflectValue>::to_value(&self.#ident)))
+    let projections = fields.iter().map(|field| {
+        let Field {
+            ident, name, ty, ..
+        } = field;
+        quote_spanned!(ty.span()=> (#name, &self.#ident))
     });
     let writes = fields.iter().map(|field| {
         let Field {
@@ -156,7 +158,11 @@ fn reflect_value(input: &DeriveInput) -> syn::Result<Tokens> {
             }
 
             fn to_value(&self) -> ::xgc_reflect::Value {
-                ::xgc_reflect::Value::Struct([#(#reads),*].into())
+                ::xgc_reflect::ValueProjection::projected_value(self)
+            }
+
+            fn project_value(&self, writer: &mut ::xgc_reflect::ValueWriter<'_>) {
+                writer.record([#(#projections),*]);
             }
 
             fn from_value(value: &::xgc_reflect::Value) -> Result<Self, String> {

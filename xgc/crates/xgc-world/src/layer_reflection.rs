@@ -1,16 +1,18 @@
 //! 复用基础状态机的反射定义与字段校验，供分层动画使用。
 
+use xgc_reflect::{Record, ValueProjection, ValueWriter, Variant};
+
 use super::{
-    branch, enum_parts, list_field, number, number_field, number_value, parameters_field,
-    parameters_value, read_list, read_parameters, record, structure, text, text_field, text_value,
-    unit_branch, Component, ComponentId, FieldDescriptor, FieldType, StateMachine, Value,
+    enum_parts, list_field, number, number_field, parameters_field, read_list, read_parameters,
+    structure, text, text_field, unit_branch, unit_value, Component, ComponentId, FieldDescriptor,
+    FieldType, StateMachine, Value,
 };
 use crate::{AnimLayer, AnimationLayers, LayerMode};
 
 impl AnimationLayers {
     /// 脚本的帧内视图也使用与存储相同的字段值。
     pub fn layers_value(&self) -> Value {
-        Value::List(self.layers.iter().map(AnimLayer::to_value).collect())
+        self.layers.as_slice().projected_value()
     }
 }
 
@@ -34,12 +36,55 @@ impl Component for AnimationLayers {
         (field == "layers").then(|| self.layers_value())
     }
 
+    fn hash_field_into(&self, field: &str, hash: &mut u64) {
+        if field == "layers" {
+            self.layers.as_slice().hash_projected(hash);
+        }
+    }
+
     fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
         if field != "layers" {
             return Err(format!("animation.layers 没有字段 {field}"));
         }
         self.layers = read_list(value, "layers", AnimLayer::from_value)?;
         Ok(())
+    }
+}
+
+impl ValueProjection for AnimLayer {
+    fn project(&self, writer: &mut ValueWriter<'_>) {
+        let empty = Record([]);
+        let mode = Variant(
+            match self.mode {
+                LayerMode::Additive => "Additive",
+                LayerMode::Override => "Override",
+            },
+            &empty,
+        );
+        let machine = match self.machine.as_ref() {
+            Some(machine) => Variant("Enabled", machine),
+            None => Variant("Disabled", &empty),
+        };
+        writer.record([
+            ("name", &self.name),
+            ("mode", &mode),
+            ("clip", &self.clip),
+            ("weight", &self.weight),
+            ("speed", &self.speed),
+            ("looping", &self.looping),
+            ("fade_time", &self.fade_time),
+            ("mask", &self.mask),
+            ("machine", &machine),
+            ("state", &self.state),
+            ("time", &self.time),
+            ("parameters", &self.parameters),
+            ("fade_from", &self.fade_from),
+            ("fade_from_time", &self.fade_from_time),
+            ("fade_from_speed", &self.fade_from_speed),
+            ("fade_from_looping", &self.fade_from_looping),
+            ("fade_elapsed", &self.fade_elapsed),
+            ("fade_duration", &self.fade_duration),
+        ]);
     }
 }
 
@@ -56,7 +101,7 @@ impl AnimLayer {
                 FieldDescriptor::new(
                     "mode",
                     FieldType::Enum(vec![unit_branch("Additive"), unit_branch("Override")]),
-                    branch("Additive", record([])),
+                    unit_value("Additive"),
                 ),
                 text_field("clip").doc("层机器启用时由当前状态选择剪辑"),
                 number_field("weight", layer.weight).doc("混合时钳制到 [0, 1]"),
@@ -67,7 +112,7 @@ impl AnimLayer {
                 FieldDescriptor::new(
                     "machine",
                     FieldType::Enum(vec![unit_branch("Disabled"), machine]),
-                    branch("Disabled", record([])),
+                    unit_value("Disabled"),
                 ),
                 text_field("state").doc("当前状态名；空表示从机器入口开始"),
                 number_field("time", layer.time).unit("s"),
@@ -92,42 +137,8 @@ impl AnimLayer {
                     .group(BLEND_STATE)
                     .read_only(),
             ]),
-            layer.to_value(),
+            layer.projected_value(),
         )
-    }
-
-    fn to_value(&self) -> Value {
-        let mode = match self.mode {
-            LayerMode::Additive => "Additive",
-            LayerMode::Override => "Override",
-        };
-        let machine = self.machine.as_ref().map_or_else(
-            || branch("Disabled", record([])),
-            |machine| branch("Enabled", machine.to_value()),
-        );
-        record([
-            ("name", text_value(&self.name)),
-            ("mode", branch(mode, record([]))),
-            ("clip", text_value(&self.clip)),
-            ("weight", number_value(self.weight)),
-            ("speed", number_value(self.speed)),
-            ("looping", Value::Bool(self.looping)),
-            ("fade_time", number_value(self.fade_time)),
-            (
-                "mask",
-                Value::List(self.mask.iter().map(|bone| text_value(bone)).collect()),
-            ),
-            ("machine", machine),
-            ("state", text_value(&self.state)),
-            ("time", number_value(self.time)),
-            ("parameters", parameters_value(&self.parameters)),
-            ("fade_from", text_value(&self.fade_from)),
-            ("fade_from_time", number_value(self.fade_from_time)),
-            ("fade_from_speed", number_value(self.fade_from_speed)),
-            ("fade_from_looping", Value::Bool(self.fade_from_looping)),
-            ("fade_elapsed", number_value(self.fade_elapsed)),
-            ("fade_duration", number_value(self.fade_duration)),
-        ])
     }
 
     fn from_value(value: &Value) -> Result<Self, String> {

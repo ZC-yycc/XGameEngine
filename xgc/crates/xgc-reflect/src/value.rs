@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{FieldType, Value};
+use super::{projection::mix_text, FieldType, Value, ValueProjection};
 
 impl Value {
     /// 结构体必须包含且仅包含声明的字段；默认值用于构造新值。
@@ -121,82 +121,13 @@ impl Value {
 
     /// 混入字符串字段的 UTF-8 字节，借用时也可直接复用同一算法。
     pub fn hash_string_into(value: &str, hash: &mut u64) {
-        for byte in value.bytes() {
-            mix(hash, u64::from(byte));
-        }
+        mix_text(hash, value);
     }
 
     /// 状态哈希用的稳定混合；只求同输入同输出，不做密码学。
     pub fn hash_into(&self, hash: &mut u64) {
-        match self {
-            Self::Bool(value) => mix(hash, u64::from(*value)),
-            Self::I64(value) => mix(hash, *value as u64),
-            Self::F64(value) => mix(hash, value.to_bits()),
-            Self::String(value) => Self::hash_string_into(value, hash),
-            Self::Vec2(value) => {
-                mix(hash, value[0].to_bits());
-                mix(hash, value[1].to_bits());
-            }
-            Self::Vec3(value) => {
-                mix(hash, value[0].to_bits());
-                mix(hash, value[1].to_bits());
-                mix(hash, value[2].to_bits());
-            }
-            Self::Vec4(value) | Self::Quat(value) => {
-                mix(hash, value[0].to_bits());
-                mix(hash, value[1].to_bits());
-                mix(hash, value[2].to_bits());
-                mix(hash, value[3].to_bits());
-            }
-            Self::Entity(value) => mix(hash, *value),
-            Self::List(values) => {
-                mix(hash, u64::from(b'['));
-                mix(hash, values.len() as u64);
-                for value in values {
-                    mix_child(hash, value);
-                }
-            }
-            Self::Struct(fields) => mix_fields(hash, b'{', fields),
-            Self::Map(fields) => mix_fields(hash, b'm', fields),
-            Self::Enum { variant, payload } => {
-                mix(hash, u64::from(b'e'));
-                mix_name(hash, variant);
-                mix_child(hash, payload);
-            }
-        }
-
-        fn mix_fields(hash: &mut u64, tag: u8, fields: &BTreeMap<String, Value>) {
-            mix(hash, u64::from(tag));
-            mix(hash, fields.len() as u64);
-            for (name, value) in fields {
-                mix_name(hash, name);
-                mix_child(hash, value);
-            }
-        }
-
-        fn mix_name(hash: &mut u64, name: &str) {
-            mix(hash, name.len() as u64);
-            for byte in name.bytes() {
-                mix(hash, u64::from(byte));
-            }
-        }
-
-        // 递归节点的边界与类型都要混入，否则异型列表可能混成同一串数值。
-        fn mix_child(hash: &mut u64, value: &Value) {
-            for byte in value.kind().bytes() {
-                mix(hash, u64::from(byte));
-            }
-            if let Value::String(text) = value {
-                mix(hash, text.len() as u64);
-            }
-            value.hash_into(hash);
-        }
+        self.hash_projected(hash);
     }
-}
-
-fn mix(hash: &mut u64, value: u64) {
-    *hash ^= value;
-    *hash = hash.wrapping_mul(0x100000001b3);
 }
 
 pub(super) fn struct_fits<F>(

@@ -14,11 +14,13 @@ use serde::{Deserialize, Serialize};
 use xgc_base::{Diagnostic, Severity, Subject};
 
 mod path;
+mod projection;
 mod schema;
 mod typed;
 mod value;
 
 pub use path::FieldPath;
+pub use projection::{Record, ValueProjection, ValueWriter, Variant};
 pub use schema::{AssetKind, FieldSchema};
 pub use typed::ReflectValue;
 pub use xgc_reflect_derive::{Component, ReflectValue};

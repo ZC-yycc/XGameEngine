@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
+use xgc_reflect::{
+    Component, ComponentId, FieldDescriptor, FieldType, Record, Value, ValueProjection,
+    ValueWriter, Variant,
+};
 
 #[path = "layer_reflection.rs"]
 mod reflected_layers;
@@ -39,12 +42,13 @@ impl Component for AnimationState {
     }
 
     fn get_field(&self, field: &str) -> Option<Value> {
-        match field {
-            "machine" => Some(self.machine.to_value()),
-            "state" => Some(text_value(&self.state)),
-            "time" => Some(number_value(self.time)),
-            "parameters" => Some(parameters_value(&self.parameters)),
-            _ => None,
+        self.field_projection(field)
+            .map(ValueProjection::projected_value)
+    }
+
+    fn hash_field_into(&self, field: &str, hash: &mut u64) {
+        if let Some(value) = self.field_projection(field) {
+            value.hash_projected(hash);
         }
     }
 
@@ -57,6 +61,18 @@ impl Component for AnimationState {
             _ => return Err(format!("animation.state 没有字段 {field}")),
         }
         Ok(())
+    }
+}
+
+impl AnimationState {
+    fn field_projection(&self, field: &str) -> Option<&dyn ValueProjection> {
+        match field {
+            "machine" => Some(&self.machine),
+            "state" => Some(&self.state),
+            "time" => Some(&self.time),
+            "parameters" => Some(&self.parameters),
+            _ => None,
+        }
     }
 }
 
@@ -159,27 +175,8 @@ impl StateMachine {
                 list_field("states", StateDef::descriptor()).doc("机器可播放的状态"),
                 list_field("transitions", TransitionDef::descriptor()).doc("按优先级排列的转移"),
             ]),
-            Self::default().to_value(),
+            Self::default().projected_value(),
         )
-    }
-
-    fn to_value(&self) -> Value {
-        record([
-            ("initial", text_value(&self.initial)),
-            (
-                "states",
-                Value::List(self.states.iter().map(StateDef::to_value).collect()),
-            ),
-            (
-                "transitions",
-                Value::List(
-                    self.transitions
-                        .iter()
-                        .map(TransitionDef::to_value)
-                        .collect(),
-                ),
-            ),
-        ])
     }
 
     fn from_value(value: &Value) -> Result<Self, String> {
@@ -193,6 +190,16 @@ impl StateMachine {
     }
 }
 
+impl ValueProjection for StateMachine {
+    fn project(&self, writer: &mut ValueWriter<'_>) {
+        writer.record([
+            ("initial", &self.initial),
+            ("states", &self.states.as_slice()),
+            ("transitions", &self.transitions.as_slice()),
+        ]);
+    }
+}
+
 impl StateDef {
     fn descriptor() -> FieldDescriptor {
         FieldDescriptor::new(
@@ -203,17 +210,8 @@ impl StateDef {
                 FieldDescriptor::new("looping", FieldType::Bool, Value::Bool(default_looping())),
                 number_field("speed", default_speed()).doc("播放速度倍数"),
             ]),
-            Self::default().to_value(),
+            Self::default().projected_value(),
         )
-    }
-
-    fn to_value(&self) -> Value {
-        record([
-            ("name", text_value(&self.name)),
-            ("clip", text_value(&self.clip)),
-            ("looping", Value::Bool(self.looping)),
-            ("speed", number_value(self.speed)),
-        ])
     }
 
     fn from_value(value: &Value) -> Result<Self, String> {
@@ -227,6 +225,17 @@ impl StateDef {
     }
 }
 
+impl ValueProjection for StateDef {
+    fn project(&self, writer: &mut ValueWriter<'_>) {
+        writer.record([
+            ("name", &self.name),
+            ("clip", &self.clip),
+            ("looping", &self.looping),
+            ("speed", &self.speed),
+        ]);
+    }
+}
+
 impl TransitionDef {
     fn descriptor() -> FieldDescriptor {
         FieldDescriptor::new(
@@ -235,7 +244,7 @@ impl TransitionDef {
                 FieldDescriptor::new(
                     "from",
                     FieldType::Enum(vec![unit_branch("Any"), text_field("State")]),
-                    branch("Any", record([])),
+                    unit_value("Any"),
                 )
                 .doc("任意状态或指定来源状态"),
                 text_field("to").doc("目标状态名"),
@@ -246,37 +255,15 @@ impl TransitionDef {
                         condition_branch("AtLeast"),
                         condition_branch("Below"),
                     ]),
-                    branch("Always", record([])),
+                    unit_value("Always"),
                 )
                 .doc("无条件，或与参数阈值比较"),
                 number_field("duration", 0.0)
                     .unit("s")
                     .doc("淡入时长；非正值使用 Animator 的设置"),
             ]),
-            Self::default().to_value(),
+            Self::default().projected_value(),
         )
-    }
-
-    fn to_value(&self) -> Value {
-        let from = self.from.as_ref().map_or_else(
-            || branch("Any", record([])),
-            |state| branch("State", text_value(state)),
-        );
-        let when = match &self.when {
-            None => branch("Always", record([])),
-            Some(TransitionCondition::AtLeast { parameter, value }) => {
-                branch("AtLeast", condition_value(parameter, *value))
-            }
-            Some(TransitionCondition::Below { parameter, value }) => {
-                branch("Below", condition_value(parameter, *value))
-            }
-        };
-        record([
-            ("from", from),
-            ("to", text_value(&self.to)),
-            ("when", when),
-            ("duration", number_value(self.duration)),
-        ])
     }
 
     fn from_value(value: &Value) -> Result<Self, String> {
@@ -315,13 +302,34 @@ impl TransitionDef {
     }
 }
 
-fn record<const N: usize>(fields: [(&str, Value); N]) -> Value {
-    Value::Struct(
-        fields
-            .into_iter()
-            .map(|(name, value)| (name.into(), value))
-            .collect(),
-    )
+impl ValueProjection for TransitionDef {
+    fn project(&self, writer: &mut ValueWriter<'_>) {
+        let empty = Record([]);
+        let from = match &self.from {
+            Some(state) => Variant("State", state),
+            None => Variant("Any", &empty),
+        };
+        let payload;
+        let when = match &self.when {
+            None => Variant("Always", &empty),
+            Some(condition) => {
+                let (variant, parameter, value) = match condition {
+                    TransitionCondition::AtLeast { parameter, value } => {
+                        ("AtLeast", parameter, value)
+                    }
+                    TransitionCondition::Below { parameter, value } => ("Below", parameter, value),
+                };
+                payload = condition_payload(parameter, value);
+                Variant(variant, &payload)
+            }
+        };
+        writer.record([
+            ("from", &from),
+            ("to", &self.to),
+            ("when", &when),
+            ("duration", &self.duration),
+        ]);
+    }
 }
 
 fn structure<'a, const N: usize>(
@@ -364,11 +372,8 @@ fn read_list<T>(
         .collect()
 }
 
-fn branch(variant: &str, payload: Value) -> Value {
-    Value::Enum {
-        variant: variant.into(),
-        payload: Box::new(payload),
-    }
+fn unit_value(variant: &str) -> Value {
+    Variant(variant, &Record([])).projected_value()
 }
 
 fn enum_parts<'a>(value: &'a Value, name: &str) -> Result<(&'a str, &'a Value), String> {
@@ -379,30 +384,27 @@ fn enum_parts<'a>(value: &'a Value, name: &str) -> Result<(&'a str, &'a Value), 
 }
 
 fn unit_branch(name: &'static str) -> FieldDescriptor {
-    FieldDescriptor::new(name, FieldType::Struct(Vec::new()), record([]))
+    FieldDescriptor::new(
+        name,
+        FieldType::Struct(Vec::new()),
+        Record([]).projected_value(),
+    )
 }
 
 fn condition_branch(name: &'static str) -> FieldDescriptor {
     FieldDescriptor::new(
         name,
         FieldType::Struct(vec![text_field("parameter"), number_field("value", 0.0)]),
-        condition_value("", 0.0),
+        condition_payload(&"", &0.0).projected_value(),
     )
 }
 
-fn condition_value(parameter: &str, value: f32) -> Value {
-    record([
-        ("parameter", text_value(parameter)),
-        ("value", number_value(value)),
-    ])
+fn condition_payload<'a>(parameter: &'a dyn ValueProjection, value: &'a f32) -> Record<'a, 2> {
+    Record([("parameter", parameter), ("value", value)])
 }
 
 fn text_field(name: &'static str) -> FieldDescriptor {
     FieldDescriptor::new(name, FieldType::String, Value::String(String::new()))
-}
-
-fn text_value(text: &str) -> Value {
-    Value::String(text.into())
 }
 
 fn text(value: &Value, field: &str) -> Result<String, String> {
@@ -416,11 +418,8 @@ const MIN_NUMBER: f64 = -(f32::MAX as f64);
 const MAX_NUMBER: f64 = f32::MAX as f64;
 
 fn number_field(name: &'static str, default: f32) -> FieldDescriptor {
-    FieldDescriptor::new(name, FieldType::F32, number_value(default)).range(MIN_NUMBER, MAX_NUMBER)
-}
-
-fn number_value(value: f32) -> Value {
-    Value::F64(f64::from(value))
+    FieldDescriptor::new(name, FieldType::F32, default.projected_value())
+        .range(MIN_NUMBER, MAX_NUMBER)
 }
 
 fn number(value: &Value, field: &str) -> Result<f32, String> {
@@ -437,15 +436,6 @@ fn parameters_field() -> FieldDescriptor {
         Value::Map(BTreeMap::new()),
     )
     .doc("按名字保存的状态机参数；条件中未设定的参数按零处理")
-}
-
-fn parameters_value(parameters: &BTreeMap<String, f32>) -> Value {
-    Value::Map(
-        parameters
-            .iter()
-            .map(|(key, value)| (key.clone(), number_value(*value)))
-            .collect(),
-    )
 }
 
 fn read_parameters(value: &Value) -> Result<BTreeMap<String, f32>, String> {
