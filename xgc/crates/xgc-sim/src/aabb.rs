@@ -3,6 +3,9 @@
 //! 不清速度的话，被推出来的盒子下一帧又带着累积的向下速度砸回去：位置在接触面上
 //! 来回抖、堆叠永远静不下来（实测贴地后速度仍每帧 +0.16 m/s）。
 
+mod broad_phase;
+
+use self::broad_phase::BroadPhase;
 use xgc_base::{EntityId, EntityKey};
 use xgc_world::{CollisionEvent, Component, PhysicsBody, Transform, Velocity, World};
 
@@ -16,6 +19,7 @@ use crate::{System, SystemAccess};
 #[derive(Clone, Debug, Default)]
 pub struct AabbCollisionSystem {
     bodies: Vec<BodyBox>,
+    broad_phase: BroadPhase,
     previous: Vec<(u64, u64)>,
     current: Vec<(u64, u64)>,
 }
@@ -67,56 +71,7 @@ impl System for AabbCollisionSystem {
         });
         // ID 唯一，原地排序可保留求解顺序并省去排序临时区。
         bodies.sort_unstable_by_key(|body| body.id.raw());
-        for i in 0..bodies.len() {
-            for j in (i + 1)..bodies.len() {
-                if !bodies[i].dynamic && !bodies[j].dynamic {
-                    continue;
-                }
-                let pair = (
-                    bodies[i].id.raw().min(bodies[j].id.raw()),
-                    bodies[i].id.raw().max(bodies[j].id.raw()),
-                );
-                if let (Some(ra), Some(rb)) = (bodies[i].sphere, bodies[j].sphere) {
-                    let separate = !bodies[i].sensor && !bodies[j].sensor;
-                    let (left, right) = bodies.split_at_mut(j);
-                    let hit = resolve_spheres(&mut left[i], &mut right[0], ra, rb, separate);
-                    if hit {
-                        self.current.push(pair);
-                    }
-                    continue;
-                }
-                let Some((axis, penetration)) = overlap(&bodies[i], &bodies[j]) else {
-                    continue;
-                };
-                self.current.push(pair);
-                if bodies[i].sensor || bodies[j].sensor {
-                    continue;
-                }
-                let direction =
-                    if (bodies[i].position[axis] - bodies[j].position[axis]).abs() < f32::EPSILON {
-                        1.0
-                    } else {
-                        (bodies[i].position[axis] - bodies[j].position[axis]).signum()
-                    };
-                match (bodies[i].dynamic, bodies[j].dynamic) {
-                    (true, true) => {
-                        bodies[i].position[axis] += direction * penetration * 0.5;
-                        bodies[j].position[axis] -= direction * penetration * 0.5;
-                        stop_along(&mut bodies[i], axis);
-                        stop_along(&mut bodies[j], axis);
-                    }
-                    (true, false) => {
-                        bodies[i].position[axis] += direction * penetration;
-                        stop_along(&mut bodies[i], axis);
-                    }
-                    (false, true) => {
-                        bodies[j].position[axis] -= direction * penetration;
-                        stop_along(&mut bodies[j], axis);
-                    }
-                    (false, false) => {}
-                }
-            }
-        }
+        solve_contacts(bodies, &mut self.broad_phase, &mut self.current);
         for body in bodies.iter() {
             if let Some(transform) = world.get_mut::<Transform>(body.key) {
                 transform.position = body.position;
@@ -138,6 +93,99 @@ impl System for AabbCollisionSystem {
         self.current = previous;
         self.current.clear();
     }
+}
+
+fn solve_contacts(
+    bodies: &mut [BodyBox],
+    broad_phase: &mut BroadPhase,
+    pairs: &mut Vec<(u64, u64)>,
+) {
+    const MAX_SPATIAL_QUERIES: usize = 4;
+    let body_count = bodies.len();
+    if body_count < 2 || !bodies.iter().any(|body| body.dynamic) {
+        return;
+    }
+    broad_phase.rebuild(bodies);
+    for i in 0..body_count - 1 {
+        let dynamic = bodies[i].dynamic;
+        broad_phase.find_after(i, i, dynamic);
+        let mut queries = 1;
+        let mut scan_suffix = false;
+        let mut next = 0;
+        loop {
+            let candidate = if scan_suffix {
+                (next < body_count).then_some(next)
+            } else {
+                broad_phase.candidates.get(next).copied()
+            };
+            let Some(j) = candidate else { break };
+            next += 1;
+            let (before, after) = bodies.split_at_mut(j);
+            let left = &mut before[i];
+            let right = &mut after[0];
+            let left_position = left.position.map(f32::to_bits);
+            let right_position = right.position.map(f32::to_bits);
+            if !resolve_pair(left, right) {
+                continue;
+            }
+            pairs.push((left.id.raw(), right.id.raw()));
+            if right.position.map(f32::to_bits) != right_position {
+                broad_phase.update(j, right);
+            }
+            if left.position.map(f32::to_bits) != left_position
+                && broad_phase.update(i, left)
+                && !scan_suffix
+            {
+                // 分离会把新接触带进范围。多次推出后按 ID 扫完余下对，避免在稠密处
+                // 反复收集、排序同一段候选。只有动态的左体会移动，余下右体均可参与。
+                if queries == MAX_SPATIAL_QUERIES {
+                    debug_assert!(dynamic);
+                    scan_suffix = true;
+                    next = j + 1;
+                } else {
+                    broad_phase.find_after(i, j, dynamic);
+                    queries += 1;
+                    next = 0;
+                }
+            }
+        }
+    }
+}
+
+fn resolve_pair(left: &mut BodyBox, right: &mut BodyBox) -> bool {
+    let separate = !left.sensor && !right.sensor;
+    if let (Some(ra), Some(rb)) = (left.sphere, right.sphere) {
+        return resolve_spheres(left, right, ra, rb, separate);
+    }
+    let Some((axis, penetration)) = overlap(left, right) else {
+        return false;
+    };
+    if separate {
+        let delta = left.position[axis] - right.position[axis];
+        let direction = if delta.abs() < f32::EPSILON {
+            1.0
+        } else {
+            delta.signum()
+        };
+        match (left.dynamic, right.dynamic) {
+            (true, true) => {
+                left.position[axis] += direction * penetration * 0.5;
+                right.position[axis] -= direction * penetration * 0.5;
+                stop_along(left, axis);
+                stop_along(right, axis);
+            }
+            (true, false) => {
+                left.position[axis] += direction * penetration;
+                stop_along(left, axis);
+            }
+            (false, true) => {
+                right.position[axis] -= direction * penetration;
+                stop_along(right, axis);
+            }
+            (false, false) => {}
+        }
+    }
+    true
 }
 
 /// 有向事件：每对接触给双方各发一条，脚本按自己的实体查即可。
