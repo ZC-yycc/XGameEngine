@@ -1,11 +1,59 @@
-//! Agent 查询 IR 的字段路径、过滤器与标量比较。
+//! Agent 查询的字段路径、过滤器与翻页游标。
+
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use serde_json::Value as Json;
-use xgc_reflect::{ComponentId, FieldPath};
-use xgc_world::{EntityData, Value};
+use xgc_base::EntityId;
+use xgc_reflect::{ComponentId, FieldPath, Value};
+use xgc_world::World;
 
 pub(super) const QUERY_DEFAULT_LIMIT: u64 = 100;
 pub(super) const QUERY_MAX_LIMIT: u64 = 1000;
+const CURSOR_PREFIX: &str = "q1:";
+
+#[derive(Clone, Copy)]
+pub(super) struct QueryEpoch(u64);
+
+impl QueryEpoch {
+    pub(super) fn new() -> Self {
+        // 同进程的不同会话与世界替换都递增。随机起点让进程重启也换一段游标序号。
+        static NEXT_EPOCH: OnceLock<AtomicU64> = OnceLock::new();
+        let next = NEXT_EPOCH.get_or_init(|| AtomicU64::new(RandomState::new().hash_one(())));
+        Self(next.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(super) fn cursor(self, revision: u64, last_id: EntityId) -> String {
+        format!(
+            "{CURSOR_PREFIX}{:016x}:{revision:016x}:{:016x}",
+            self.0,
+            last_id.raw()
+        )
+    }
+
+    pub(super) fn resume(self, revision: u64, value: &Json) -> Result<EntityId, String> {
+        let (epoch, saved_revision, last_id) = value
+            .as_str()
+            .and_then(decode_cursor)
+            .ok_or_else(|| "cursor 格式无效".to_string())?;
+        if epoch != self.0 || saved_revision != revision {
+            return Err("cursor 已失效，请从查询首项重新开始".to_string());
+        }
+        Ok(last_id)
+    }
+}
+
+fn decode_cursor(token: &str) -> Option<(u64, u64, EntityId)> {
+    let (epoch, tail) = token.strip_prefix(CURSOR_PREFIX)?.split_once(':')?;
+    let (revision, last_id) = tail.split_once(':')?;
+    Some((
+        u64::from_str_radix(epoch, 16).ok()?,
+        u64::from_str_radix(revision, 16).ok()?,
+        EntityId::from_raw(u64::from_str_radix(last_id, 16).ok()?),
+    ))
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct FieldRef {
@@ -15,16 +63,14 @@ pub(super) struct FieldRef {
 }
 
 impl FieldRef {
-    pub(super) fn read<'a>(&self, entity: &'a EntityData) -> Option<&'a Value> {
-        let component = entity
-            .components
-            .iter()
-            .find(|item| item.component == self.component)?;
-        let (_, root) = component
-            .fields
-            .iter()
-            .find(|(name, _)| name == self.path.root())?;
-        self.path.read(root).ok()
+    pub(super) fn read<T>(
+        &self,
+        world: &World,
+        id: EntityId,
+        project: impl FnOnce(&Value) -> T,
+    ) -> Option<T> {
+        let root = world.get_field(id, self.component, self.path.root())?;
+        self.path.read(&root).ok().map(project)
     }
 }
 
@@ -36,10 +82,12 @@ pub(super) struct Filter {
 }
 
 impl Filter {
-    pub(super) fn matches(&self, entity: &EntityData) -> bool {
+    pub(super) fn matches(&self, world: &World, id: EntityId) -> bool {
         self.path
-            .read(entity)
-            .is_some_and(|value| compare(value, self.axis, self.op, &self.value))
+            .read(world, id, |value| {
+                compare(value, self.axis, self.op, &self.value)
+            })
+            .unwrap_or(false)
     }
 }
 

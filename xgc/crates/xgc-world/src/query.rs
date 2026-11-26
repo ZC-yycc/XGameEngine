@@ -1,5 +1,5 @@
-use xgc_base::EntityKey;
-use xgc_reflect::Component;
+use xgc_base::{EntityId, EntityKey};
+use xgc_reflect::{Component, ComponentId};
 
 use super::{Archetype, World};
 
@@ -114,6 +114,18 @@ pub(crate) fn apply3_mut_arch<A: Component, B: Component, C: Component>(
 }
 
 impl World {
+    /// 枚举持久 ID，顺序由 archetype 决定。组件条件可整组跳过不匹配的行。
+    pub fn entity_ids(
+        &self,
+        component: Option<ComponentId>,
+    ) -> impl Iterator<Item = EntityId> + '_ {
+        self.archetypes
+            .iter()
+            .filter(move |arch| component.is_none_or(|id| arch.columns.contains_key(&id)))
+            .flat_map(|arch| arch.entities.iter().copied())
+            .filter_map(|key| self.entity(key))
+    }
+
     /// 双组件不可变遍历；只访问同时含 `A`、`B` 的 archetype。
     pub fn for_each2<A: Component, B: Component>(&self, mut f: impl FnMut(EntityKey, &A, &B)) {
         for arch in &self.archetypes {

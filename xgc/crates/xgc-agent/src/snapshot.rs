@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value as Json};
 
-use super::Agent;
+use super::{query::QueryEpoch, Agent};
 use xgc_world::{Journal, WorldData};
 
 impl Agent {
@@ -20,6 +20,8 @@ impl Agent {
             .clone();
         let data: WorldData =
             serde_json::from_value(data).map_err(|err| format!("快照解析失败：{err}"))?;
+        // 恢复过程中可能先清空旧行，再因坏组件失败。
+        self.query_epoch = QueryEpoch::new();
         self.world
             .restore_world_data(&data)
             .map_err(|message| format!("恢复快照失败：{message}"))?;

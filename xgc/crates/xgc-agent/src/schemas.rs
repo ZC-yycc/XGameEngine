@@ -22,7 +22,11 @@ pub(super) fn query() -> Json {
             },
             "offset": {
                 "type": ["integer", "null"], "minimum": 0, "maximum": u64::MAX, "default": 0,
-                "description": "从 0 起算的分页偏移。缺少或为 null 时从首项开始。"
+                "description": "从 0 起算的分页偏移。缺少或为 null 时从首项开始；有 cursor 时以 cursor 为准。"
+            },
+            "cursor": {
+                "type": ["string", "null"],
+                "description": "上一页的 next_cursor，从上一页的最后一个实体 ID 之后继续。沿用筛选条件；会话或世界版本变更后须重新查询。"
             },
             "limit": {
                 "type": ["integer", "null"], "minimum": 0, "maximum": u64::MAX,

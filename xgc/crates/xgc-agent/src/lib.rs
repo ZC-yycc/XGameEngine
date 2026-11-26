@@ -23,12 +23,15 @@ mod snapshot;
 mod container_tests;
 
 pub use mcp::Mcp;
-use query::{axis_index, FieldRef, Filter, FilterOp, QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT};
+use query::{
+    axis_index, FieldRef, Filter, FilterOp, QueryEpoch, QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT,
+};
 
 pub const PROTOCOL: &str = "xgc.agent/1";
 
 pub struct Agent {
     world: World,
+    query_epoch: QueryEpoch,
     registry: Registry,
     plans: HashMap<u64, Plan>,
     applied: HashMap<u64, Applied>,
@@ -50,6 +53,7 @@ impl Agent {
         let base = world.snapshot();
         Self {
             world,
+            query_epoch: QueryEpoch::new(),
             registry,
             plans: HashMap::new(),
             applied: HashMap::new(),
@@ -144,57 +148,70 @@ impl Agent {
         };
         let select = self.parse_select(params)?;
         let filter = self.parse_filter(params)?;
+        let revision = self.world.revision();
+        let after = params
+            .get("cursor")
+            .filter(|value| !value.is_null())
+            .map(|value| self.query_epoch.resume(revision, value))
+            .transpose()?;
 
-        let data = self.world.world_data();
-        let mut entities: Vec<_> = data
-            .entities
-            .into_iter()
-            .filter(|entity| {
-                component.is_none_or(|id| {
-                    entity
-                        .components
-                        .iter()
-                        .any(|component| component.component.0 == id)
-                })
+        // 总量与偏移沿用精确计数，先只收集匹配的 ID。完整实体和投影值都到分页后才读取。
+        let mut ids: Vec<_> = self
+            .world
+            .entity_ids(component.map(ComponentId))
+            .filter(|&id| {
+                filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.matches(&self.world, id))
             })
-            .filter(|entity| filter.as_ref().is_none_or(|filter| filter.matches(entity)))
             .collect();
-        let total = entities.len();
-        let start = offset.min(total);
+        ids.sort_unstable();
+        let total = ids.len();
+        let start = after.map_or_else(
+            || offset.min(total),
+            |last| ids.partition_point(|&id| id <= last),
+        );
         let end = start.saturating_add(limit).min(total);
-        let page: Vec<_> = entities.drain(start..end).collect();
-        let next_offset = if end < total { Some(end) } else { None };
-
+        let page = &ids[start..end];
+        let next_offset = (end < total).then_some(end);
+        let next_cursor = next_offset.and_then(|_| {
+            page.last()
+                .copied()
+                .or(after)
+                .map(|last| self.query_epoch.cursor(revision, last))
+        });
+        let mut result = json!({
+            "revision": revision,
+            "total": total,
+            "offset": start,
+            "next_offset": next_offset,
+            "next_cursor": next_cursor,
+        });
         if let Some(fields) = select {
             let rows: Vec<_> = page
                 .iter()
-                .map(|entity| {
+                .map(|&id| {
                     let mut values = serde_json::Map::new();
                     for field in &fields {
                         let value = field
-                            .read(entity)
-                            .and_then(|value| serde_json::to_value(value).ok());
-                        values.insert(field.label.clone(), value.unwrap_or(Json::Null));
+                            .read(&self.world, id, |value| {
+                                serde_json::to_value(value).unwrap_or(Json::Null)
+                            })
+                            .unwrap_or(Json::Null);
+                        values.insert(field.label.clone(), value);
                     }
-                    json!({"id": entity.id.to_string(), "values": values})
+                    json!({"id": id, "values": values})
                 })
                 .collect();
-            return Ok(json!({
-                "revision": data.revision,
-                "total": total,
-                "offset": start,
-                "rows": rows,
-                "next_offset": next_offset,
-            }));
+            result["rows"] = Json::Array(rows);
+        } else {
+            let entities: Vec<_> = page
+                .iter()
+                .filter_map(|&id| self.world.entity_data(id))
+                .collect();
+            result["entities"] = json!(entities);
         }
-
-        Ok(json!({
-            "revision": data.revision,
-            "total": total,
-            "offset": start,
-            "entities": page,
-            "next_offset": next_offset,
-        }))
+        Ok(result)
     }
 
     fn parse_select(&self, params: &Json) -> Result<Option<Vec<FieldRef>>, String> {
@@ -287,6 +304,8 @@ impl Agent {
     }
 
     fn replay(&mut self) -> Result<Json, String> {
+        // 重放先恢复基准再执行事务，失败也可能已经换过当前世界。
+        self.query_epoch = QueryEpoch::new();
         let hash = self
             .journal
             .replay(&mut self.world, &self.base)
@@ -372,6 +391,7 @@ impl Agent {
             .restore_world_data(&data)
             .map_err(|message| format!("恢复失败：{message}"))?;
         self.world = world;
+        self.query_epoch = QueryEpoch::new();
         self.plans.clear();
         self.applied.clear();
         self.journal = Journal::new();

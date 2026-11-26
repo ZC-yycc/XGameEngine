@@ -40,6 +40,12 @@
 
 用迁移后的 showcase 在原生窗口抓取了 1280×720、1440×720、1920×720 三张截图。三档均显示 GUID 引用的狐狸模型，工具栏和场景路径均在窗口内，预制体框与 Inspector 的中文可读。视口按原宽高比内接中央区域并与 Gizmo 共用位置。该检查覆盖编辑态布局和资产加载，Play 中的 HUD 交互需单独验收。
 
+## Agent 查询与重放
+
+`world.query` 按持久实体 ID 升序返回结果。继续翻页时将上一页的 `next_cursor` 填入 `cursor` 并沿用筛选条件。写事务或更换世界后旧游标失效。查询先筛选 ID，只为当前页读取投影字段或完整实体。对 1,000 和 12,000 实体的世界查询 200 行、每行 4 个字段，本机 Release 的 JSON-RPC 中位耗时分别为 1.917 和 2.323 毫秒，响应仍约 53 KB。[查询回归与测量](crates/xgc-agent/tests/query.rs)
+
+`edit.undo` 与 `edit.revert` 成功后会记录逆向事务。回归覆盖误删、恢复、后续编辑与重放，逐项比对世界状态、哈希及 revision。[协议回归](crates/xgc-agent/tests/protocol.rs)
+
 ## 结构化反射与文件版本
 
 Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑时间和名称，并撤销修改。Agent 使用 `animation.animator:events[0].time` 查询，在 `edit.plan` 的组件字段中写 `events[0].time`。路径下标从 0 起。Lua `xgc.get` 返回的列表按 Lua 约定从 1 起，`xgc.set` 可以按零基路径改写叶字段。

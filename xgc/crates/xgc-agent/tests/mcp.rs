@@ -91,6 +91,7 @@ fn tools_advertise_their_actual_inputs() {
     let query = &schema("world_query")["properties"];
     assert_eq!(query["component"]["type"], json!(["string", "null"]));
     assert_eq!(query["offset"]["default"], 0);
+    assert_eq!(query["cursor"]["type"], json!(["string", "null"]));
     assert_eq!(query["limit"]["default"], 100);
     assert_eq!(query["select"]["items"]["type"], "string");
     let filter = &query["filter"];
