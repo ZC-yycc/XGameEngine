@@ -1,7 +1,7 @@
 //! 窗口输入和逻辑视口。两个宿主在同一个固定步边界消费设备边沿。
 
-use egui::{Event, Key, PointerButton, Pos2, Rect, Vec2};
-use xgc_sim::{InputState, KeyCode, MouseButton, DEFAULT_UI_VIEWPORT};
+use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, Vec2};
+use xgc_sim::{InputEdge, InputState, KeyCode, MouseButton, DEFAULT_UI_VIEWPORT};
 use xgc_world::{HostUiInput, UiPointerEdge};
 
 const KEY_CODES: &[(Key, KeyCode)] = &[
@@ -65,6 +65,16 @@ const KEY_CODES: &[(Key, KeyCode)] = &[
     (Key::F12, KeyCode::F12),
 ];
 
+const MOUSE_BUTTONS: &[(PointerButton, MouseButton)] = &[
+    (PointerButton::Primary, MouseButton::Left),
+    (PointerButton::Secondary, MouseButton::Right),
+    (PointerButton::Middle, MouseButton::Middle),
+];
+
+fn modifiers(keys: Modifiers) -> [bool; 3] {
+    [keys.shift, keys.ctrl, keys.alt]
+}
+
 pub fn fit_viewport(available: Rect, size: [u32; 2]) -> Option<Rect> {
     let size = Vec2::new(size[0] as f32, size[1] as f32);
     let scale = (available.width() / size.x).min(available.height() / size.y);
@@ -83,6 +93,8 @@ fn logical_point(viewport: Rect, point: Pos2) -> Option<[f32; 2]> {
 #[derive(Default)]
 pub struct WindowInput {
     gameplay: InputState,
+    gameplay_edges: Vec<InputEdge>,
+    pressed_mouse_in_viewport: [bool; MOUSE_BUTTONS.len()],
     pointer: Option<[f32; 2]>,
     primary_down: bool,
     cancel_pointer: bool,
@@ -103,7 +115,7 @@ impl WindowInput {
                 self.gameplay.keys.clear();
                 self.gameplay.mouse.clear();
                 self.pointer = None;
-                self.discard_ui_edges();
+                self.discard_edges();
                 self.primary_down = false;
                 return;
             }
@@ -115,61 +127,110 @@ impl WindowInput {
             if viewport.is_none() {
                 self.discard_ui_edges();
             }
-            for &(key, code) in KEY_CODES {
-                self.set_key(code, input.key_down(key));
-            }
             // egui 只报告组合键状态，输入映射用左侧键代表这一组修饰键。
-            self.set_key(KeyCode::ShiftLeft, input.modifiers.shift);
-            self.set_key(KeyCode::ControlLeft, input.modifiers.ctrl);
-            self.set_key(KeyCode::AltLeft, input.modifiers.alt);
-            for (button, code) in [
-                (PointerButton::Primary, MouseButton::Left),
-                (PointerButton::Secondary, MouseButton::Right),
-                (PointerButton::Middle, MouseButton::Middle),
-            ] {
+            let held_modifiers = modifiers(input.modifiers);
+            for (code, pressed) in [KeyCode::ShiftLeft, KeyCode::ControlLeft, KeyCode::AltLeft]
+                .into_iter()
+                .zip(held_modifiers)
+            {
+                if self.gameplay.keys.contains(&code) != pressed {
+                    self.gameplay_edges.push(InputEdge::Key {
+                        code,
+                        pressed,
+                        modifiers: held_modifiers,
+                    });
+                    self.set_key(code, pressed);
+                }
+            }
+            for &(button, code) in MOUSE_BUTTONS {
                 if self.pointer.is_some() && input.pointer.button_down(button) {
                     self.gameplay.mouse.insert(code);
                 } else {
                     self.gameplay.mouse.remove(&code);
                 }
             }
-            let Some(viewport) = viewport else {
-                return;
-            };
             for event in &input.events {
-                match event {
+                match *event {
                     Event::PointerButton {
                         pos,
-                        button: PointerButton::Primary,
+                        button,
                         pressed,
                         ..
                     } => {
-                        let point = logical_point(viewport, *pos);
-                        self.pointer_edges.push(if *pressed {
-                            UiPointerEdge::Press(point)
-                        } else {
-                            UiPointerEdge::Release(point)
-                        });
+                        self.record_pointer(viewport, pos, button, pressed);
                     }
                     Event::Key {
                         key,
-                        pressed: true,
+                        pressed,
                         repeat: false,
                         modifiers,
                         ..
-                    } if !modifiers.command && !modifiers.alt => match key {
-                        Key::Tab => self.navigation = Some("tab"),
-                        Key::ArrowUp => self.navigation = Some("up"),
-                        Key::ArrowDown => self.navigation = Some("down"),
-                        Key::ArrowLeft => self.navigation = Some("left"),
-                        Key::ArrowRight => self.navigation = Some("right"),
-                        Key::Enter | Key::Space => self.confirm = true,
-                        _ => {}
-                    },
+                    } => {
+                        self.record_key(key, pressed, modifiers, viewport.is_some());
+                    }
                     _ => {}
                 }
             }
+            for &(key, code) in KEY_CODES {
+                self.set_key(code, input.key_down(key));
+            }
         });
+    }
+
+    fn record_pointer(
+        &mut self,
+        viewport: Option<Rect>,
+        pos: Pos2,
+        button: PointerButton,
+        pressed: bool,
+    ) {
+        let point = viewport.and_then(|viewport| logical_point(viewport, pos));
+        if button == PointerButton::Primary && viewport.is_some() {
+            self.pointer_edges.push(if pressed {
+                UiPointerEdge::Press(point)
+            } else {
+                UiPointerEdge::Release(point)
+            });
+        }
+        let Some(index) = MOUSE_BUTTONS.iter().position(|&(key, _)| key == button) else {
+            return;
+        };
+        // 在视口内开始的点击允许在外部释放，类似 HUD 的捕获边界。
+        if pressed && point.is_none() {
+            return;
+        }
+        let active = &mut self.pressed_mouse_in_viewport[index];
+        if *active != pressed {
+            *active = pressed;
+            self.gameplay_edges.push(InputEdge::Mouse {
+                button: MOUSE_BUTTONS[index].1,
+                pressed,
+            });
+        }
+    }
+
+    fn record_key(&mut self, key: Key, pressed: bool, mods: Modifiers, has_viewport: bool) {
+        if let Some(&(_, code)) = KEY_CODES.iter().find(|&&(candidate, _)| key == candidate) {
+            if self.gameplay.keys.contains(&code) != pressed {
+                self.set_key(code, pressed);
+                self.gameplay_edges.push(InputEdge::Key {
+                    code,
+                    pressed,
+                    modifiers: modifiers(mods),
+                });
+            }
+        }
+        if pressed && has_viewport && !mods.command && !mods.alt {
+            match key {
+                Key::Tab => self.navigation = Some("tab"),
+                Key::ArrowUp => self.navigation = Some("up"),
+                Key::ArrowDown => self.navigation = Some("down"),
+                Key::ArrowLeft => self.navigation = Some("left"),
+                Key::ArrowRight => self.navigation = Some("right"),
+                Key::Enter | Key::Space => self.confirm = true,
+                _ => {}
+            }
+        }
     }
 
     fn set_key(&mut self, code: KeyCode, pressed: bool) {
@@ -182,6 +243,20 @@ impl WindowInput {
 
     pub fn gameplay(&self) -> &InputState {
         &self.gameplay
+    }
+
+    pub(crate) fn gameplay_edges(&self) -> &[InputEdge] {
+        &self.gameplay_edges
+    }
+
+    pub(crate) fn discard_gameplay_edges(&mut self) {
+        self.gameplay_edges.clear();
+    }
+
+    pub fn discard_edges(&mut self) {
+        self.discard_gameplay_edges();
+        self.pressed_mouse_in_viewport.fill(false);
+        self.discard_ui_edges();
     }
 
     /// 重绘比固定步快时保留边沿，一次补多步时也只取走一次。

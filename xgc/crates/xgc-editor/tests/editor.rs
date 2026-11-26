@@ -265,7 +265,7 @@ fn editor_play_runs_scripts_and_reads_input() {
     .unwrap();
     std::fs::write(
         dir.join("move.lua"),
-        "function update(ctx)\n  if action_pressed(ctx, 'Jump') then\n    local p = entity_pos(ctx, self_id(ctx))\n    set_pos(ctx, p.x + 1.0, p.y, p.z)\n  end\nend\n",
+        "function update(ctx)\n  if action_down(ctx, 'Jump') then\n    local p = entity_pos(ctx, self_id(ctx))\n    set_pos(ctx, p.x + 1.0, p.y, p.z)\n  end\nend\n",
     )
     .unwrap();
     let mut world = World::new();

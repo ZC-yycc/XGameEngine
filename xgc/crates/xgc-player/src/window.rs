@@ -144,10 +144,7 @@ impl PlayerApp {
         let Some(runner) = self.runner.as_mut().filter(|_| !self.failed) else {
             return;
         };
-        if let Some(map) = &self.input_map {
-            runner.apply_input(map, self.input.gameplay());
-        }
-        match runner.step_with_ui_input(self.input.take_ui_input()) {
+        match runner.step_window(self.input_map.as_ref(), &mut self.input) {
             Ok(_) => {
                 self.frames += 1;
                 self.audio.submit(runner.audio_samples());

@@ -157,6 +157,7 @@ impl ScriptRuntime {
                 self.note_error(&err);
             }
         }
+        self.discard_action_edges();
         if pending.is_empty() {
             return;
         }
@@ -257,12 +258,29 @@ impl ScriptRuntime {
         self.entries.len()
     }
 
-    /// 外部输入桥：设置动作按住状态，脚本 `action_pressed` 下一帧可见。
-    pub fn set_action(&mut self, action: &str, pressed: bool) {
-        self.view
-            .borrow_mut()
-            .actions
-            .insert(action.to_string(), pressed);
+    /// 无设备边沿的调用方只需提交当前按住状态，转换会在下一帧消费。
+    pub fn set_action(&mut self, action: &str, down: bool) {
+        let mut view = self.view.borrow_mut();
+        let state = view.action_mut(action);
+        state.pressed |= down && !state.down;
+        state.released |= !down && state.down;
+        state.down = down;
+    }
+
+    /// 宿主已折叠逐个绑定的边沿，不能再从动作的按住状态推导一次。
+    pub fn set_action_input(&mut self, action: &str, down: bool, pressed: bool, released: bool) {
+        let mut view = self.view.borrow_mut();
+        let state = view.action_mut(action);
+        state.down = down;
+        state.pressed |= pressed;
+        state.released |= released;
+    }
+
+    pub fn discard_action_edges(&mut self) {
+        for state in self.view.borrow_mut().actions.values_mut() {
+            state.pressed = false;
+            state.released = false;
+        }
     }
 
     pub fn clear_actions(&mut self) {
@@ -271,7 +289,12 @@ impl ScriptRuntime {
 
     /// 外部输入桥：设置模拟量轴，脚本 `axis` 下一帧可见。
     pub fn set_axis(&mut self, axis: &str, value: f32) {
-        self.view.borrow_mut().axes.insert(axis.to_string(), value);
+        let mut view = self.view.borrow_mut();
+        if let Some(current) = view.axes.get_mut(axis) {
+            *current = value;
+        } else {
+            view.axes.insert(axis.to_owned(), value);
+        }
     }
 
     pub fn clear_axes(&mut self) {

@@ -54,7 +54,9 @@ pub use character_kcc::{
     slip_limit, GRAVITY_Y, GROUND_NORMAL_MIN_DOT, GROUND_PREDICTION_FACTOR, REST_GAP_FACTOR,
     SLIDE_BAND_DEGREES,
 };
-pub use input::{Axis, Binding, Combo, InputMap, InputState, KeyCode, MouseButton};
+pub use input::{
+    ActionInput, Axis, Binding, Combo, InputEdge, InputMap, InputState, KeyCode, MouseButton,
+};
 pub use mixer::{write_wav_mono, SoftwareMixer};
 pub use particles::{ParticleStats, ParticleSystem};
 pub use rapier_world::{RapierPhysicsSystem, RapierWorld, FIXED_DT};

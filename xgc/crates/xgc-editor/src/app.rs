@@ -367,12 +367,11 @@ impl EditorApp {
             return;
         }
         self.play_input.sample(ctx, viewport);
-        self.state.apply_input(self.play_input.gameplay());
         if self.state.is_paused() {
             if self.last_play_update.take().is_some() {
                 self.play_audio.clear();
             }
-            self.play_input.discard_ui_edges();
+            self.play_input.discard_edges();
             return;
         }
         let elapsed = self
@@ -381,16 +380,16 @@ impl EditorApp {
             .map_or(Duration::ZERO, |previous| {
                 now.saturating_duration_since(previous)
             });
-        match self.state.advance_play_with_io(
-            elapsed,
-            || Some(self.play_input.take_ui_input()),
-            |samples| self.play_audio.submit(samples),
-        ) {
+        match self
+            .state
+            .advance_play_with_io(elapsed, Some(&mut self.play_input), |samples| {
+                self.play_audio.submit(samples)
+            }) {
             Ok(Some(wait)) => ctx.request_repaint_after(wait.saturating_sub(now.elapsed())),
             Ok(None) => self.last_play_update = None,
             Err(err) => {
                 self.last_play_update = None;
-                self.play_input.discard_ui_edges();
+                self.play_input.discard_edges();
                 self.play_audio.clear();
                 self.status = Some(err);
                 ctx.request_repaint();

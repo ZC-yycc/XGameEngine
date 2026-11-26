@@ -21,7 +21,7 @@ use audio::AudioStage;
 use xgc_asset::{AssetPaths, SearchPaths};
 use xgc_render::MeshCache;
 use xgc_script::ScriptRuntime;
-use xgc_sim::{apply_root_motion, InputMap, InputState, ParticleSystem, Simulation};
+use xgc_sim::{apply_root_motion, InputEdge, InputMap, InputState, ParticleSystem, Simulation};
 use xgc_world::{HostUiInput, ParticleQuad, RootMotionLibrary, World};
 
 /// 宿主只有在明确知道内容根时才扫描 GUID 目录，避免空白编辑世界扫描工作目录。
@@ -46,6 +46,8 @@ pub struct ScriptedRunner {
     particles: ParticleSystem,
     root_motion: RootMotionLibrary,
     audio: AudioStage,
+    input_state: InputState,
+    input_edges: Vec<InputEdge>,
 }
 
 impl ScriptedRunner {
@@ -63,6 +65,8 @@ impl ScriptedRunner {
                 particles: ParticleSystem::new(),
                 root_motion,
                 audio,
+                input_state: InputState::default(),
+                input_edges: Vec::new(),
             },
             meshes,
         )
@@ -119,14 +123,58 @@ impl ScriptedRunner {
         self.runtime.entity_count()
     }
 
-    /// 每次重写所有动作与轴，把松开后的 false / 0 也送给脚本。
+    /// 无窗口输入可在零个或多个固定步之间提交状态快照。
     pub fn apply_input(&mut self, map: &InputMap, state: &InputState) {
+        self.input_edges.clear();
+        if self.input_state != *state {
+            state.append_edges_since(&self.input_state, &mut self.input_edges);
+            self.input_state.clone_from(state);
+        }
+        Self::apply_input_sample(&mut self.runtime, map, state, &self.input_edges);
+    }
+
+    /// 只在即将执行一个固定步时取输入，边沿与 HUD 事件共享消费边界。
+    #[cfg(feature = "window-input")]
+    pub fn step_window(
+        &mut self,
+        map: Option<&InputMap>,
+        input: &mut window::WindowInput,
+    ) -> Result<u64, String> {
+        if let Some(map) = map {
+            Self::apply_input_sample(
+                &mut self.runtime,
+                map,
+                input.gameplay(),
+                input.gameplay_edges(),
+            );
+        }
+        input.discard_gameplay_edges();
+        self.step_with_ui_input(input.take_ui_input())
+    }
+
+    pub fn discard_action_edges(&mut self) {
+        self.runtime.discard_action_edges();
+    }
+
+    pub fn clear_input(&mut self) {
+        self.runtime.clear_actions();
+        self.runtime.clear_axes();
+        self.input_state = InputState::default();
+        self.input_edges.clear();
+    }
+
+    fn apply_input_sample(
+        runtime: &mut ScriptRuntime,
+        map: &InputMap,
+        state: &InputState,
+        edges: &[InputEdge],
+    ) {
         for name in map.actions.keys() {
-            self.runtime
-                .set_action(name, map.action_pressed(name, state));
+            let action = map.action_input(name, state, edges);
+            runtime.set_action_input(name, action.down, action.pressed, action.released);
         }
         for name in map.axes.keys() {
-            self.runtime.set_axis(name, map.axis_value(name, state));
+            runtime.set_axis(name, map.axis_value(name, state));
         }
     }
 

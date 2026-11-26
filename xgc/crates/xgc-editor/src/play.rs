@@ -3,9 +3,10 @@
 use std::path::Path;
 use std::time::Duration;
 
+use xgc_host::window::WindowInput;
 use xgc_host::{asset_paths, FixedStepClock, ScriptedRunner};
 use xgc_sim::{FrameRecord, InputMap, InputState};
-use xgc_world::{HostUiInput, World};
+use xgc_world::World;
 
 use crate::{EditorState, PlaySession};
 
@@ -93,24 +94,26 @@ impl EditorState {
         if let Some(session) = &mut self.play {
             session.paused = true;
             session.clock.reset();
+            session.runner.discard_action_edges();
         }
     }
 
     pub fn resume(&mut self) {
-        if let Some(session) = &mut self.play {
+        if let Some(session) = self.play.as_mut().filter(|session| session.paused) {
+            session.runner.discard_action_edges();
             session.paused = false;
         }
     }
 
     /// 按经过的真实时间运行固定步，返回下一步前的重绘等待时间。
     pub fn advance_play(&mut self, elapsed: Duration) -> Result<Option<Duration>, String> {
-        self.advance_play_with_io(elapsed, || None, |_| {})
+        self.advance_play_with_io(elapsed, None, |_| {})
     }
 
     pub(crate) fn advance_play_with_io(
         &mut self,
         elapsed: Duration,
-        mut input: impl FnMut() -> Option<HostUiInput>,
+        mut input: Option<&mut WindowInput>,
         mut audio: impl FnMut(&[f32]),
     ) -> Result<Option<Duration>, String> {
         let Some(session) = self.play.as_mut().filter(|session| !session.paused) else {
@@ -118,8 +121,8 @@ impl EditorState {
         };
         let (steps, wait) = session.clock.advance(elapsed);
         for _ in 0..steps {
-            let result = match input() {
-                Some(input) => session.runner.step_with_ui_input(input),
+            let result = match input.as_deref_mut() {
+                Some(input) => session.runner.step_window(session.input.as_ref(), input),
                 None => session.runner.step(),
             };
             if let Err(err) = result {
@@ -135,6 +138,10 @@ impl EditorState {
         let Some(session) = self.play.as_mut().filter(|session| session.paused) else {
             return Ok(None);
         };
+        if session.runner.world().host_ui_input().is_some() {
+            session.runner.clear_input();
+        }
+        session.runner.discard_action_edges();
         let frame = session.runner.step()?;
         let world = session.runner.world();
         Ok(Some(FrameRecord {
@@ -188,12 +195,12 @@ mod tests {
         let mut blocks = Vec::new();
         let dt = Duration::from_secs_f32(1.0 / 60.0);
         editor
-            .advance_play_with_io(dt * 3, || None, |pcm| blocks.push((pcm.len(), pcm[0])))
+            .advance_play_with_io(dt * 3, None, |pcm| blocks.push((pcm.len(), pcm[0])))
             .unwrap();
         assert_eq!(blocks, [0.25, 0.5, 0.75].map(|gain| (800, sample * gain)));
         editor.pause();
         assert_eq!(
-            editor.advance_play_with_io(dt, || None, |_| panic!("暂停不能输出新块")),
+            editor.advance_play_with_io(dt, None, |_| panic!("暂停不能输出新块")),
             Ok(None)
         );
         editor.stop();

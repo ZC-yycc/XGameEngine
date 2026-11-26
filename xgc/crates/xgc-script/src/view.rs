@@ -104,12 +104,19 @@ impl EntityView {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ActionState {
+    pub down: bool,
+    pub pressed: bool,
+    pub released: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ScriptView {
     pub delta: f32,
     pub time: f32,
     pub entities: Vec<EntityView>,
-    pub actions: BTreeMap<String, bool>,
+    pub actions: BTreeMap<String, ActionState>,
     /// 模拟量轴：`axis(ctx, "MoveX")` 读这里。与动作一样由宿主每帧写入。
     pub axes: BTreeMap<String, f32>,
     /// 同一播放会话内所有脚本共用音量与命令队列。
@@ -128,6 +135,13 @@ pub struct ScriptView {
 }
 
 impl ScriptView {
+    pub(crate) fn action_mut(&mut self, name: &str) -> &mut ActionState {
+        if !self.actions.contains_key(name) {
+            self.actions.insert(name.to_owned(), ActionState::default());
+        }
+        self.actions.get_mut(name).expect("动作状态已插入")
+    }
+
     pub fn entity(&self, id: u64) -> Option<&EntityView> {
         self.entities
             .iter()

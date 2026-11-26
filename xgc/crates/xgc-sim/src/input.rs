@@ -113,10 +113,65 @@ pub struct InputMap {
     pub axes: BTreeMap<String, Axis>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InputState {
     pub keys: BTreeSet<KeyCode>,
     pub mouse: BTreeSet<MouseButton>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum InputEdge {
+    Key {
+        code: KeyCode,
+        pressed: bool,
+        /// 记录主键边沿时的 Shift、Control、Alt，短按完成后仍可匹配组合键。
+        modifiers: [bool; 3],
+    },
+    Mouse {
+        button: MouseButton,
+        pressed: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionInput {
+    pub down: bool,
+    pub pressed: bool,
+    pub released: bool,
+}
+
+impl InputState {
+    /// 无窗口调用方提供的是状态快照，从连续采样中提取可观察到的边沿。
+    pub fn append_edges_since(&self, previous: &Self, edges: &mut Vec<InputEdge>) {
+        let modifiers = self.modifiers();
+        for (current, other, pressed) in [(self, previous, true), (previous, self, false)] {
+            edges.extend(
+                current
+                    .keys
+                    .difference(&other.keys)
+                    .map(|&code| InputEdge::Key {
+                        code,
+                        pressed,
+                        modifiers,
+                    }),
+            );
+            edges.extend(
+                current
+                    .mouse
+                    .difference(&other.mouse)
+                    .map(|&button| InputEdge::Mouse { button, pressed }),
+            );
+        }
+    }
+
+    fn modifiers(&self) -> [bool; 3] {
+        [
+            [KeyCode::ShiftLeft, KeyCode::ShiftRight],
+            [KeyCode::ControlLeft, KeyCode::ControlRight],
+            [KeyCode::AltLeft, KeyCode::AltRight],
+        ]
+        .map(|keys| keys.iter().any(|key| self.keys.contains(key)))
+    }
 }
 
 impl InputMap {
@@ -139,10 +194,32 @@ impl InputMap {
         self.axes.keys().cloned().collect()
     }
 
-    pub fn action_pressed(&self, name: &str, state: &InputState) -> bool {
+    pub fn action_down(&self, name: &str, state: &InputState) -> bool {
         self.actions
             .get(name)
-            .is_some_and(|bindings| bindings.iter().any(|binding| pressed(binding, state)))
+            .is_some_and(|bindings| bindings.iter().any(|binding| held(binding, state)))
+    }
+
+    pub fn action_input(&self, name: &str, state: &InputState, edges: &[InputEdge]) -> ActionInput {
+        let mut action = ActionInput {
+            down: self.action_down(name, state),
+            ..ActionInput::default()
+        };
+        let Some(bindings) = self.actions.get(name) else {
+            return action;
+        };
+        // 任一绑定的边沿都算，即使同一动作的另一绑定已经按住。
+        for edge in edges.iter().copied() {
+            if bindings.iter().any(|binding| matches_edge(binding, edge)) {
+                match edge {
+                    InputEdge::Key { pressed, .. } | InputEdge::Mouse { pressed, .. } => {
+                        action.pressed |= pressed;
+                        action.released |= !pressed;
+                    }
+                }
+            }
+        }
+        action
     }
 
     /// 正负都按下时归零，避免轴抖动。
@@ -150,8 +227,8 @@ impl InputMap {
         let Some(axis) = self.axes.get(name) else {
             return 0.0;
         };
-        let positive = axis.positive.iter().any(|binding| pressed(binding, state));
-        let negative = axis.negative.iter().any(|binding| pressed(binding, state));
+        let positive = axis.positive.iter().any(|binding| held(binding, state));
+        let negative = axis.negative.iter().any(|binding| held(binding, state));
         match (positive, negative) {
             (true, false) => 1.0,
             (false, true) => -1.0,
@@ -160,21 +237,37 @@ impl InputMap {
     }
 }
 
-fn pressed(binding: &Binding, state: &InputState) -> bool {
+impl Combo {
+    fn matches(&self, modifiers: [bool; 3]) -> bool {
+        [self.shift, self.control, self.alt] == modifiers
+    }
+}
+
+fn held(binding: &Binding, state: &InputState) -> bool {
     match binding {
         Binding::Key(key) => state.keys.contains(key),
         Binding::Mouse(button) => state.mouse.contains(button),
         Binding::Combo(combo) => {
-            state.keys.contains(&combo.key)
-                && combo.shift
-                    == (state.keys.contains(&KeyCode::ShiftLeft)
-                        || state.keys.contains(&KeyCode::ShiftRight))
-                && combo.control
-                    == (state.keys.contains(&KeyCode::ControlLeft)
-                        || state.keys.contains(&KeyCode::ControlRight))
-                && combo.alt
-                    == (state.keys.contains(&KeyCode::AltLeft)
-                        || state.keys.contains(&KeyCode::AltRight))
+            state.keys.contains(&combo.key) && combo.matches(state.modifiers())
         }
+    }
+}
+
+fn matches_edge(binding: &Binding, edge: InputEdge) -> bool {
+    match (binding, edge) {
+        (Binding::Key(key), InputEdge::Key { code, .. }) => *key == code,
+        (Binding::Mouse(expected), InputEdge::Mouse { button, .. }) => *expected == button,
+        (
+            Binding::Combo(combo),
+            InputEdge::Key {
+                code,
+                pressed,
+                modifiers,
+            },
+        ) => {
+            // 松开主键时修饰键可能已经先松开，仍须报告释放。
+            combo.key == code && (!pressed || combo.matches(modifiers))
+        }
+        _ => false,
     }
 }

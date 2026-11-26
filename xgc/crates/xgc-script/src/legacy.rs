@@ -352,21 +352,24 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
         )
         .map_err(|err| err.to_string())?;
     crate::ui_api::register(lua, commands, view)?;
-    let action_view = Rc::clone(view);
-    globals
-        .set(
-            "action_pressed",
-            lua.create_function(move |_, (_ctx, name): (mlua::Value, String)| {
-                Ok(action_view
-                    .borrow()
-                    .actions
-                    .get(&name)
-                    .copied()
-                    .unwrap_or(false))
-            })
-            .map_err(|err| err.to_string())?,
-        )
-        .map_err(|err| err.to_string())?;
+    type ReadAction = fn(&crate::view::ActionState) -> bool;
+    let action_fields: [(&str, ReadAction); 3] = [
+        ("action_down", |state| state.down),
+        ("action_pressed", |state| state.pressed),
+        ("action_released", |state| state.released),
+    ];
+    for (name, read) in action_fields {
+        let view = Rc::clone(view);
+        globals
+            .set(
+                name,
+                lua.create_function(move |_, (_ctx, name): (mlua::Value, String)| {
+                    Ok(view.borrow().actions.get(&name).is_some_and(read))
+                })
+                .map_err(|err| err.to_string())?,
+            )
+            .map_err(|err| err.to_string())?;
+    }
 
     register_script_state(lua, view, self_id)?;
     crate::character_api::register(lua, commands, view, self_id)?;
