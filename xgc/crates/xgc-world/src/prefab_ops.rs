@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use xgc_base::EntityId;
 
 use crate::{
-    Command, Component, ComponentId, EntityData, GlobalTransform, Parent, PrefabInstance,
+    Command, Component, ComponentData, EntityData, GlobalTransform, Parent, PrefabInstance,
     Transform, Value, World, WorldData,
 };
 
@@ -50,7 +50,7 @@ pub fn remap_parent(data: &mut EntityData, mapping: &BTreeMap<EntityId, EntityId
 }
 
 /// 仅还原选中实体所属的实例，返回按资产 ID 排序的映射。
-/// 已有实体按来源 ID 保留场景 ID 和变换，实例根保留场景中的外部父节点。
+/// 已有实体按来源 ID 保留场景 ID；实例根保留场景中的局部变换和外部父节点。
 pub fn revert_prefab(
     world: &mut World,
     prefab: &WorldData,
@@ -74,7 +74,7 @@ pub fn revert_prefab(
     let root_data = world
         .entity_data(root)
         .ok_or_else(|| format!("无法读取预制体实例根：{root}"))?;
-    let mut commands = Vec::new();
+    let mut entities = Vec::with_capacity(prefab.entities.len());
     for entity in &prefab.entities {
         let mut data = entity.clone().with_id(mapping[&entity.id]);
         remap_parent(&mut data, &mapping);
@@ -83,24 +83,39 @@ pub fn revert_prefab(
         data.components
             .push(instance_data(entity, &instance.source).into_data());
         if entity.id == retained_root.id {
-            preserve_component(&mut data, &root_data, Parent::ID);
+            // 同一个外部父节点下保留局部 TRS，即可精确保留摆放，无需分解世界矩阵。
+            data.components
+                .retain(|component| component.component != Transform::ID);
+            data.components.extend(
+                root_data
+                    .components
+                    .iter()
+                    .filter(|component| matches!(component.component, Parent::ID | Transform::ID))
+                    .cloned(),
+            );
         }
-        if let Some(existing_id) = current.get(&entity.id) {
-            let existing = world
-                .entity_data(*existing_id)
-                .ok_or_else(|| format!("无法读取预制体实例实体：{existing_id}"))?;
-            preserve_component(&mut data, &existing, Transform::ID);
-            preserve_component(&mut data, &existing, GlobalTransform::ID);
-            commands.push(Command::Replace { data });
-        } else {
-            commands.push(Command::Spawn { data });
-        }
+        entities.push(data);
     }
-    for (source_id, entity) in current {
-        if !mapping.contains_key(&source_id) {
-            commands.push(Command::Despawn { entity });
-        }
-    }
+    let removed: Vec<_> = current
+        .into_iter()
+        .filter_map(|(source_id, entity)| (!mapping.contains_key(&source_id)).then_some(entity))
+        .collect();
+    rebuild_globals(world, &mut entities, &removed)?;
+    let commands = entities
+        .into_iter()
+        .map(|data| {
+            if world.key(data.id).is_some() {
+                Command::Replace { data }
+            } else {
+                Command::Spawn { data }
+            }
+        })
+        .chain(
+            removed
+                .into_iter()
+                .map(|entity| Command::Despawn { entity }),
+        )
+        .collect();
     apply(world, commands, "预制体 Revert")?;
     Ok(mapping.into_iter().collect())
 }
@@ -203,23 +218,112 @@ fn has_parent(data: &EntityData) -> bool {
         .any(|component| component.component == Parent::ID)
 }
 
-fn preserve_component(data: &mut EntityData, existing: &EntityData, component_id: ComponentId) {
-    let Some(component) = existing
-        .components
-        .iter()
-        .find(|component| component.component == component_id)
-    else {
-        return;
-    };
-    if let Some(slot) = data
-        .components
-        .iter_mut()
-        .find(|slot| slot.component == component_id)
-    {
-        *slot = component.clone();
-    } else {
-        data.components.push(component.clone());
+#[derive(Clone, Copy)]
+struct LocalPose {
+    transform: Transform,
+    parent: Option<EntityId>,
+}
+
+fn rebuild_globals(
+    world: &World,
+    entities: &mut [EntityData],
+    removed: &[EntityId],
+) -> Result<(), String> {
+    // 视口直接读全局变换。提交前按还原后的父链重算，避免用到资产里的缓存或旧实例姿势。
+    let mut poses: HashMap<_, _> = removed.iter().map(|&id| (id, None)).collect();
+    for entity in entities.iter() {
+        let mut has_global = false;
+        let mut transform = Transform::default();
+        let mut parent = None;
+        for component in &entity.components {
+            match component.component {
+                GlobalTransform::ID => {
+                    // 覆写派生值前仍校验原字段，让损坏的资产不能通过还原。
+                    read_component::<GlobalTransform>(component)?;
+                    has_global = true;
+                }
+                Transform::ID => transform = read_component(component)?,
+                Parent::ID => parent = Some(read_component::<Parent>(component)?.entity),
+                _ => {}
+            }
+        }
+        poses.insert(
+            entity.id,
+            has_global.then_some(LocalPose { transform, parent }),
+        );
     }
+
+    let mut globals = HashMap::new();
+    let mut chain = Vec::new();
+    let mut visited = HashSet::new();
+    for entity in entities {
+        let Some(component) = entity
+            .components
+            .iter_mut()
+            .find(|component| component.component == GlobalTransform::ID)
+        else {
+            continue;
+        };
+        visited.clear();
+        let mut ancestor = Some(entity.id);
+        let mut parent_global = None;
+        while let Some(id) = ancestor {
+            if let Some(&global) = globals.get(&id) {
+                parent_global = Some(global);
+                break;
+            }
+            let pose = match poses.get(&id) {
+                Some(&pose) => pose,
+                None => live_pose(world, id),
+            };
+            let Some(pose) = pose else { break };
+            if !visited.insert(id) {
+                return Err(format!("预制体还原后的父链存在循环：{id}"));
+            }
+            chain.push((id, pose.transform));
+            ancestor = pose.parent;
+        }
+        while let Some((id, local)) = chain.pop() {
+            let global = match parent_global {
+                Some(parent) => GlobalTransform::compose(&parent, &local),
+                None => GlobalTransform::from_local(&local),
+            };
+            globals.insert(id, global);
+            parent_global = Some(global);
+        }
+
+        let global = &globals[&entity.id];
+        for field in GlobalTransform::fields() {
+            let value = global.get_field(field.name).expect("全局变换字段必须可读");
+            if let Some((_, slot)) = component
+                .fields
+                .iter_mut()
+                .find(|(name, _)| name == field.name)
+            {
+                *slot = value;
+            } else {
+                component.fields.push((field.name.to_string(), value));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_component<T: Component>(data: &ComponentData) -> Result<T, String> {
+    let mut component = T::default_value();
+    for (name, value) in &data.fields {
+        component.set_field(name, value)?;
+    }
+    Ok(component)
+}
+
+fn live_pose(world: &World, id: EntityId) -> Option<LocalPose> {
+    let key = world.key(id)?;
+    world.get::<GlobalTransform>(key)?;
+    Some(LocalPose {
+        transform: world.get::<Transform>(key).copied().unwrap_or_default(),
+        parent: world.get::<Parent>(key).map(|parent| parent.entity),
+    })
 }
 
 fn apply(world: &mut World, commands: Vec<Command>, operation: &str) -> Result<(), String> {

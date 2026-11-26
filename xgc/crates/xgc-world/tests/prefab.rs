@@ -1,9 +1,11 @@
 //! 还原范围由实例根和同源父链共同决定。
 
+use std::f32::consts::FRAC_1_SQRT_2;
+
 use xgc_base::EntityId;
 use xgc_world::{
-    instantiate_prefab, revert_prefab, Command, Component, ComponentData, Name, Parent,
-    PrefabInstance, Transform, Value, World, WorldData,
+    instantiate_prefab, revert_prefab, Command, Component, ComponentData, GlobalTransform, Name,
+    Parent, PrefabInstance, Transform, Value, World, WorldData,
 };
 
 const SOURCE: &str = "Prefabs/fixture.json";
@@ -93,6 +95,101 @@ fn revert_parent_walk_stops_at_source_boundary() {
         world.entity_data(mapping[1].1),
         Some(before.entities[1].clone())
     );
+}
+
+#[test]
+fn revert_restores_child_poses_in_the_instance_parent_chain() {
+    let mut prefab = World::new();
+    let root = prefab.spawn((Transform::default(), GlobalTransform::default()));
+    let root = prefab.entity(root).unwrap();
+    let child_pose = Transform {
+        position: [1.0, 2.0, 3.0],
+        rotation: [0.0, FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2],
+        scale: [4.0, 2.0, 1.0],
+    };
+    let child = prefab.spawn((
+        child_pose,
+        GlobalTransform::from_local(&child_pose),
+        Parent { entity: root },
+    ));
+    let grandchild_pose = Transform {
+        position: [1.0, 0.0, -2.0],
+        ..Transform::default()
+    };
+    prefab.spawn((
+        grandchild_pose,
+        GlobalTransform::from_local(&grandchild_pose),
+        Parent {
+            entity: prefab.entity(child).unwrap(),
+        },
+    ));
+    let mut asset = prefab.world_data();
+    // 父链不能依赖文件的实体顺序，迁移后的全局值也可能只有局部变换。
+    asset.entities.reverse();
+
+    let mut world = World::new();
+    let ancestor_pose = Transform {
+        position: [10.0, 0.0, 2.0],
+        rotation: [0.0, 0.0, FRAC_1_SQRT_2, FRAC_1_SQRT_2],
+        scale: [2.0, 3.0, 1.0],
+    };
+    let ancestor = world.spawn((ancestor_pose, GlobalTransform::from_local(&ancestor_pose)));
+    let outer_pose = Transform {
+        position: [2.0, 4.0, 0.0],
+        ..Transform::default()
+    };
+    let outer = world.spawn((
+        outer_pose,
+        GlobalTransform::default(),
+        Parent {
+            entity: world.entity(ancestor).unwrap(),
+        },
+    ));
+    let outer = world.entity(outer).unwrap();
+    let first = instantiate_prefab(&mut world, &asset, Some(SOURCE)).unwrap();
+    let second = instantiate_prefab(&mut world, &asset, Some(SOURCE)).unwrap();
+    attach(&mut world, first[0].1, outer);
+    attach(&mut world, second[0].1, outer);
+    let other_entities: Vec<_> = second
+        .iter()
+        .map(|(_, id)| world.entity_data(*id).unwrap())
+        .collect();
+
+    let placement = Transform {
+        position: [5.0, 2.0, -1.0],
+        rotation: [FRAC_1_SQRT_2, 0.0, 0.0, FRAC_1_SQRT_2],
+        scale: [3.0, 1.0, 2.0],
+    };
+    let root_key = world.key(first[0].1).unwrap();
+    *world.get_mut::<Transform>(root_key).unwrap() = placement;
+    let child_key = world.key(first[1].1).unwrap();
+    *world.get_mut::<Transform>(child_key).unwrap() = Transform::default();
+    *world.get_mut::<GlobalTransform>(child_key).unwrap() = GlobalTransform::default();
+
+    let outer_global =
+        GlobalTransform::compose(&GlobalTransform::from_local(&ancestor_pose), &outer_pose);
+    let root_global = GlobalTransform::compose(&outer_global, &placement);
+    let child_global = GlobalTransform::compose(&root_global, &child_pose);
+    let grandchild_global = GlobalTransform::compose(&child_global, &grandchild_pose);
+
+    // 从实例成员触发首次还原，然后从根重复操作。
+    for selected in [first[1].1, first[0].1] {
+        assert_eq!(revert_prefab(&mut world, &asset, selected).unwrap(), first);
+        let root = world.key(first[0].1).unwrap();
+        assert_eq!(world.get::<Parent>(root), Some(&Parent { entity: outer }));
+        assert_eq!(world.get::<Transform>(root), Some(&placement));
+        let child = world.key(first[1].1).unwrap();
+        assert_eq!(world.get::<Transform>(child), Some(&child_pose));
+        assert_eq!(world.get::<GlobalTransform>(root), Some(&root_global));
+        assert_eq!(world.get::<GlobalTransform>(child), Some(&child_global));
+        assert_eq!(
+            world.get::<GlobalTransform>(world.key(first[2].1).unwrap()),
+            Some(&grandchild_global)
+        );
+        for data in &other_entities {
+            assert_eq!(world.entity_data(data.id).as_ref(), Some(data));
+        }
+    }
 }
 
 #[test]
