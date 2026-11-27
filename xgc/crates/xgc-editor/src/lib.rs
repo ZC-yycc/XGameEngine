@@ -16,14 +16,14 @@ pub use transform_ops::snap;
 
 use std::path::{Path, PathBuf};
 
-use xgc_base::EntityId;
+use xgc_base::{EntityId, EntityKey};
 use xgc_host::{FixedStepClock, ScriptedRunner};
 use xgc_reflect::{FieldSchema, Registry, Value};
 use xgc_sim::InputMap;
 use xgc_store::{load_world_with_bytes, save_snapshot_with_bytes, ProjectSession};
 use xgc_world::{
     builtin_registry, Camera, Command, ComponentData, ComponentId, GlobalTransform, Material,
-    MeshRenderer, Name, Transform, World, WorldData,
+    MeshRenderer, Name, Parent, Transform, World, WorldData,
 };
 
 pub struct EntityRow {
@@ -426,48 +426,31 @@ impl EditorState {
     }
 
     pub fn entities(&self) -> Vec<EntityRow> {
-        let mut rows = Vec::new();
-        let Some(data) = self.world_data_for_view() else {
-            return rows;
-        };
-        for entity in &data.entities {
-            let name = entity
-                .components
-                .iter()
-                .find(|component| component.component.0 == 0x0103)
-                .and_then(|component| {
-                    component.fields.iter().find_map(|(field, value)| {
-                        (field == "value").then(|| value_as_string(value))
-                    })
-                })
-                .unwrap_or_else(|| format!("#{}", entity.id.raw()));
-            let parent = entity
-                .components
-                .iter()
-                .find(|component| component.component.0 == 0x0104)
-                .and_then(|component| {
-                    component.fields.iter().find_map(|(field, value)| {
-                        (field == "entity").then(|| match value {
-                            Value::Entity(raw) => Some(EntityId::from_raw(*raw)),
-                            _ => None,
-                        })?
-                    })
-                });
-            rows.push(EntityRow {
-                id: entity.id,
-                name,
-                parent,
-            });
-        }
-        rows.sort_by_key(|row| row.id);
-        rows
+        let mut keys = Vec::new();
+        self.collect_entity_keys(&mut keys);
+        keys.into_iter()
+            .map(|(id, key)| self.entity_row(id, key))
+            .collect()
     }
 
-    fn world_data_for_view(&self) -> Option<WorldData> {
-        Some(match &self.play {
-            Some(session) => session.runner.world().world_data(),
-            None => self.world.world_data(),
-        })
+    fn collect_entity_keys(&self, keys: &mut Vec<(EntityId, EntityKey)>) {
+        let world = self.world();
+        // 每帧从当前世界取句柄，防止换场景、撤销和 Play 切换后沿用旧句柄。
+        keys.clear();
+        keys.reserve(world.len());
+        keys.extend(world.entity_keys());
+        keys.sort_unstable_by_key(|&(id, _)| id);
+    }
+
+    fn entity_row(&self, id: EntityId, key: EntityKey) -> EntityRow {
+        let world = self.world();
+        EntityRow {
+            id,
+            name: world
+                .get::<Name>(key)
+                .map_or_else(|| format!("#{id}"), |name| name.value.clone()),
+            parent: world.get::<Parent>(key).map(|parent| parent.entity),
+        }
     }
 
     pub fn inspector(&self) -> Vec<ComponentRow> {
@@ -579,13 +562,6 @@ impl EditorState {
         self.scene = None;
         self.dirty = false;
         Ok(())
-    }
-}
-
-fn value_as_string(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        other => format!("{other:?}"),
     }
 }
 

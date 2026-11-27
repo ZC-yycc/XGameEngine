@@ -175,8 +175,8 @@ impl Fixture {
         assert_eq!(world.count::<Parent>(), ENTITIES - DISTRICTS - 1);
         assert_eq!(world.count::<MeshRenderer>(), MESHES);
 
-        let root = std::env::temp_dir()
-            .join("xgc-s6")
+        let root = std::env::var_os("XGC_S6_OUTPUT_ROOT")
+            .map_or_else(|| std::env::temp_dir().join("xgc-s6"), PathBuf::from)
             .join(format!("project-{}", std::process::id()));
         save_world(&root.join(SCENE), &world.world_data()).unwrap();
         save_project(

@@ -10,6 +10,8 @@ mod toolbar;
 #[cfg(test)]
 mod editor_city_tests;
 #[cfg(test)]
+mod hierarchy_tests;
+#[cfg(test)]
 mod hud_tests;
 #[cfg(test)]
 mod reload_tests;
@@ -26,7 +28,7 @@ use xgc_render::{GpuContext, MeshCache, Renderer};
 use crate::gizmo::{distance_to_segment, project};
 use crate::transform_ops::snap;
 use crate::{AssetEntry, EditorState};
-use xgc_base::EntityId;
+use xgc_base::{EntityId, EntityKey};
 use xgc_render::camera_view_projection;
 
 struct Viewport {
@@ -77,6 +79,7 @@ pub struct EditorApp {
     play_audio: WindowAudio,
     assets: Option<Vec<AssetEntry>>,
     selected_asset: Option<String>,
+    hierarchy_keys: Vec<(EntityId, EntityKey)>,
 }
 
 impl EditorApp {
@@ -103,6 +106,7 @@ impl EditorApp {
             play_audio: WindowAudio::default(),
             assets: None,
             selected_asset: None,
+            hierarchy_keys: Vec::new(),
         }
     }
 
@@ -345,24 +349,31 @@ impl EditorApp {
         }
         self.assets_panel(ui);
         let selected = self.state.selected();
-        let rows = self.state.entities();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for row in rows {
-                let label = match row.parent {
-                    Some(parent) => format!("{}  (parent {})", row.name, parent.raw()),
-                    None => row.name,
-                };
-                if ui
-                    .selectable_label(
-                        selected == Some(row.id),
-                        format!("{}  {}", row.id.raw(), label),
-                    )
-                    .clicked()
-                {
-                    self.state.select(Some(row.id));
+        self.state.collect_entity_keys(&mut self.hierarchy_keys);
+        let row_height = (ui.text_style_height(&egui::TextStyle::Button)
+            + 2.0 * ui.spacing().button_padding.y)
+            .max(ui.spacing().interact_size.y);
+        egui::ScrollArea::vertical()
+            // 可见名称变短时，滚轮命中区仍覆盖整个列表宽度。
+            .auto_shrink([false, true])
+            .show_rows(ui, row_height, self.hierarchy_keys.len(), |ui, rows| {
+                // 行高固定，长名称截断，悬停仍可看到完整名称和父 ID。
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                for &(id, key) in &self.hierarchy_keys[rows] {
+                    let row = self.state.entity_row(id, key);
+                    let label = match row.parent {
+                        Some(parent) => format!("{id}  {}  (parent {parent})", row.name),
+                        None => format!("{id}  {}", row.name),
+                    };
+                    let response = ui
+                        .push_id(id, |ui| ui.selectable_label(selected == Some(id), &label))
+                        .inner
+                        .on_hover_text(label);
+                    if response.clicked() {
+                        self.state.select(Some(id));
+                    }
                 }
-            }
-        });
+            });
     }
     fn poll_play_scripts(&mut self, ctx: &egui::Context, now: Instant) {
         const INTERVAL: Duration = Duration::from_secs(1);
