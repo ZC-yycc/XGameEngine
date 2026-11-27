@@ -57,6 +57,10 @@ pub(super) fn query() -> Json {
                 "enum": ["rows", "columns", null], "default": "rows",
                 "description": "columns 需要 select，返回类型目录 columns 和按列排列的 rows。首列为实体 ID，其余列按 select 排列，缺失值为 null。"
             },
+            "include_defaults": {
+                "type": ["boolean", "null"], "default": true,
+                "description": "false 省略等于 schema 默认值的字段。列描述的 default_rows 是本页零起始的 [start,end) 区间，区间里的 null 或缺省尾格可补默认值；其他 null 仍表示缺失。"
+            },
             "filter": {
                 "type": ["object", "null"],
                 "properties": {

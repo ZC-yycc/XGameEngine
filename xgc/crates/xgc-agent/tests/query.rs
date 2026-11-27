@@ -191,6 +191,101 @@ fn columns_keep_projection_order_missing_values_and_exact_ids_over_mcp() {
 }
 
 #[test]
+fn query_omits_defaults_while_preserving_missing_and_signed_zero() {
+    let mut agent = Agent::new();
+    let mut missing = entity(3, 0.0);
+    missing
+        .components
+        .retain(|component| component.component != Velocity::ID);
+    let mut scaled = entity(4, 2.0);
+    scaled.components[0]
+        .fields
+        .push(("scale".into(), Value::Vec3([2.0, 1.0, 1.0])));
+    let data = restore(&mut agent, vec![scaled, missing, entity(2, -0.0)]);
+    let initial = agent.world().state_hash();
+    let mut params = json!({
+        "format": "columns",
+        "select": [
+            "core.transform:position", "core.velocity:linear", "core.name:value", "core.transform:scale",
+        ],
+        "include_defaults": false,
+        "limit": 2,
+    });
+    let first = result(&mut agent, "world.query", params.clone());
+    assert_eq!(first["total"], 3);
+    assert_eq!(first["columns"][1]["default_rows"], json!([[1, 2]]));
+    assert_eq!(first["columns"][2]["default_rows"], json!([[0, 1]]));
+    assert!(first["columns"][3].get("default_rows").is_none());
+    assert_eq!(first["columns"][4]["default_rows"], json!([[0, 2]]));
+    assert_eq!(
+        first["rows"],
+        json!([
+            ["2", [-0.0, 0, 0], null, "Entity 2"],
+            ["3", null, null, "Entity 3"]
+        ])
+    );
+    assert!(first["rows"][0][1][0].as_f64().unwrap().is_sign_negative());
+    assert!(first["next_cursor"].is_string());
+
+    let mut mcp = Mcp::new();
+    let restore = mcp
+        .handle_line(&mcp_request("world_restore", json!({"data": data})))
+        .unwrap();
+    mcp_text(&serde_json::from_str(&restore).unwrap());
+    let reply = mcp
+        .handle_line(&mcp_request("world_query", params.clone()))
+        .unwrap();
+    let response: Json = serde_json::from_str(&reply).unwrap();
+    let text = mcp_text(&response);
+    let decoded: Json = serde_json::from_str(text).unwrap();
+    assert_eq!(text, decoded.to_string());
+    assert_eq!(decoded["columns"], first["columns"]);
+    assert_eq!(decoded["rows"], first["rows"]);
+
+    params["cursor"] = first["next_cursor"].clone();
+    let next = result(&mut agent, "world.query", params.clone());
+    assert_eq!(next["columns"][2]["default_rows"], json!([[0, 1]]));
+    assert!(next["columns"][4].get("default_rows").is_none());
+    assert_eq!(
+        next["rows"],
+        json!([["4", [2, 0, 0], null, "Entity 4", [2, 1, 1]]])
+    );
+    assert!(next["next_cursor"].is_null());
+
+    params["format"] = json!("rows");
+    params["cursor"] = Json::Null;
+    let rows = result(&mut agent, "world.query", params);
+    let present = &rows["rows"][0]["values"];
+    let missing = &rows["rows"][1]["values"];
+    assert!(present.get("core.velocity:linear").is_none());
+    assert_eq!(missing.get("core.velocity:linear"), Some(&Json::Null));
+    assert!(missing.get("core.transform:position").is_none());
+    assert!(present["core.transform:position"]["value"][0]
+        .as_f64()
+        .unwrap()
+        .is_sign_negative());
+
+    let entities = result(
+        &mut agent,
+        "world.query",
+        json!({"include_defaults": false}),
+    );
+    let entities: Vec<EntityData> = serde_json::from_value(entities["entities"].clone()).unwrap();
+    assert_eq!(entities[0].components.len(), 3);
+    let velocity = entities[0]
+        .components
+        .iter()
+        .find(|row| row.component == Velocity::ID)
+        .unwrap();
+    assert!(velocity.fields.is_empty());
+    assert!(!entities[1]
+        .components
+        .iter()
+        .any(|row| row.component == Velocity::ID));
+    assert_eq!(agent.world().state_hash(), initial);
+}
+
+#[test]
 fn cursor_rejects_mutations_replacements_and_foreign_sessions() {
     let mut agent = Agent::new();
     let data = restore(&mut agent, vec![entity(2, 1.0), entity(4, 2.0)]);
@@ -340,9 +435,14 @@ fn projected_query_budget() {
                 "select": ["core.transform:position", "core.transform:scale", "core.name:value", "core.velocity:linear"],
                 "limit": limit,
             });
-            for format in ["rows", "columns"] {
+            for (format, include_defaults) in
+                [("rows", true), ("columns", true), ("columns", false)]
+            {
                 let mut params = params.clone();
                 params["format"] = json!(format);
+                if !include_defaults {
+                    params["include_defaults"] = json!(false);
+                }
                 let rpc = request("world.query", params.clone());
                 let mcp_call = mcp_request("world_query", params);
                 let (rpc_response, rpc_times) = time_query(|| agent.handle_line(&rpc).unwrap());
@@ -361,10 +461,22 @@ fn projected_query_budget() {
                         (limit * 2).to_string()
                     );
                 }
+                if !include_defaults {
+                    for column in [2, 4] {
+                        assert_eq!(
+                            decoded["columns"][column]["default_rows"],
+                            json!([[0, limit]])
+                        );
+                    }
+                    assert_eq!(
+                        decoded["rows"][0],
+                        json!(["2", [1, 0, 0], null, "Entity 2"])
+                    );
+                }
                 // 游标绑定各自会话，业务荷载必须一致。
                 assert_eq!(decoded["rows"], rpc_json["result"]["rows"]);
                 println!(
-                    "entities={count} rows={limit} format={format} rpc_bytes={} {} mcp_bytes={} mcp_text_bytes={} {}",
+                    "entities={count} rows={limit} format={format} include_defaults={include_defaults} rpc_bytes={} {} mcp_bytes={} mcp_text_bytes={} {}",
                     rpc_response.len(),
                     latencies(rpc_times),
                     mcp_response.len(),

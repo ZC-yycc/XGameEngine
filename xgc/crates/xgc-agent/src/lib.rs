@@ -28,8 +28,8 @@ mod container_tests;
 
 pub use mcp::Mcp;
 use query::{
-    axis_index, projected_columns, projected_rows, FieldRef, Filter, FilterOp, QueryEpoch,
-    QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT,
+    axis_index, omit_entity_defaults, projected_columns, projected_rows, FieldRef, Filter,
+    FilterOp, Projection, QueryEpoch, QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT,
 };
 
 pub const PROTOCOL: &str = "xgc.agent/1";
@@ -162,6 +162,13 @@ impl Agent {
             None => None,
         };
         let select = self.parse_select(params)?;
+        let include_defaults = params
+            .get("include_defaults")
+            .filter(|value| !value.is_null())
+            .map(|value| value.as_bool().ok_or("include_defaults 必须是布尔值"))
+            .transpose()?
+            .unwrap_or(true);
+        let defaults = (!include_defaults).then_some(&self.registry);
         let columns = match params.get("format").filter(|value| !value.is_null()) {
             None => false,
             Some(value) => match value.as_str() {
@@ -212,18 +219,28 @@ impl Agent {
             "next_cursor": next_cursor,
         });
         if let Some(fields) = select {
+            let projections: Vec<_> = fields
+                .iter()
+                .map(|field| Projection::new(field, defaults))
+                .collect();
             if columns {
-                let (columns, rows) = projected_columns(&self.world, page, &fields);
+                let (columns, rows) =
+                    projected_columns(&self.world, page, &projections, !include_defaults);
                 result["columns"] = columns;
                 result["rows"] = rows;
             } else {
-                result["rows"] = projected_rows(&self.world, page, &fields);
+                result["rows"] = projected_rows(&self.world, page, &projections);
             }
         } else {
-            let entities: Vec<_> = page
+            let mut entities: Vec<_> = page
                 .iter()
                 .filter_map(|&id| self.world.entity_data(id))
                 .collect();
+            if let Some(registry) = defaults {
+                for entity in &mut entities {
+                    omit_entity_defaults(entity, registry);
+                }
+            }
             result["entities"] = json!(entities);
         }
         Ok(result)

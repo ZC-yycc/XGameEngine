@@ -68,6 +68,15 @@ fn protocol_queries_edits_and_reverts_a_map_enum_leaf() {
         json!({"kind":"f64","value":1.0})
     );
     assert_eq!(before["rows"][0]["values"].get(missing), Some(&Json::Null));
+    let compact = agent
+        .call(
+            "world.query",
+            &json!({"select": [path, missing], "include_defaults": false}),
+        )
+        .unwrap();
+    // Map 里的实际缺省为 1，分支类型的缺省为 0，只有沿根值读取才能判准。
+    assert!(compact["rows"][0]["values"].get(&path).is_none());
+    assert_eq!(compact["rows"][0]["values"].get(missing), Some(&Json::Null));
     let plan = agent
         .call(
             "edit.plan",
