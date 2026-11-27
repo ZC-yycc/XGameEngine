@@ -1,6 +1,6 @@
 //! XGC 内建组件：M1 只放最小集合，够跑命令 / 查询 / schema 测试。
 
-use xgc_base::EntityId;
+use xgc_base::{layer::LayerIndex, EntityId};
 use xgc_reflect::{Component, ComponentId, FieldDescriptor, FieldType, Value};
 
 /// 内建：局部变换。
@@ -163,6 +163,14 @@ impl Component for Velocity {
 pub struct Name {
     #[field(doc = "显示名")]
     pub value: String,
+}
+
+/// 实体所在碰撞层。未声明此组件的实体使用默认层 0。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Component)]
+#[component(id = 0x0106, name = "core.layer", doc = "实体的碰撞层")]
+pub struct CollisionLayer {
+    #[field(doc = "项目碰撞矩阵中的层索引")]
+    pub index: LayerIndex,
 }
 
 /// 内建：父节点引用；层级系统据此算 `GlobalTransform`。

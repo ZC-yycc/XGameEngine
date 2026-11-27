@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use xgc_base::EntityId;
+use xgc_base::{layer::LayerIndex, EntityId};
 
 use crate::{FieldDescriptor, FieldType, Value, ValueProjection, ValueWriter};
 
@@ -79,6 +79,32 @@ scalar!(
     |v: &EntityId| v.raw(),
     |v: &u64| { Some(EntityId::from_raw(*v)) }
 );
+
+impl ReflectValue for LayerIndex {
+    fn field_type() -> FieldType {
+        FieldType::U32
+    }
+
+    fn to_value(&self) -> Value {
+        Value::I64(i64::from(self.raw()))
+    }
+
+    fn from_value(value: &Value) -> Result<Self, String> {
+        let Value::I64(index) = value else {
+            return Err(type_error(Self::field_type().as_str(), value));
+        };
+        u8::try_from(*index)
+            .ok()
+            .and_then(Self::new)
+            .ok_or_else(|| format!("层索引 {index} 超出 0–{}", Self::MAX))
+    }
+
+    fn descriptor(name: &'static str, default: &Self) -> FieldDescriptor {
+        FieldDescriptor::new(name, Self::field_type(), default.to_value())
+            .range(0.0, f64::from(Self::MAX))
+            .step(1.0)
+    }
+}
 
 impl ReflectValue for String {
     fn field_type() -> FieldType {

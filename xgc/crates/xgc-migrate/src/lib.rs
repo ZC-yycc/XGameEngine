@@ -336,6 +336,7 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
             },
             global_data,
         ];
+        components.extend(old.layer_component().map_err(MigrationError::Parse)?);
 
         if let Some(parent) = old.parent {
             if !seen.contains(&parent.0) {

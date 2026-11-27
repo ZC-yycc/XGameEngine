@@ -63,10 +63,13 @@ fn describe_lists_protocol_components_and_world_state() {
     let response = result(call(&mut agent, "engine.describe", Json::Null));
     assert_eq!(response["protocol"], "xgc.agent/1");
     assert_eq!(response["engine"], "xgc");
-    assert_eq!(
-        response["components"]["types"].as_array().unwrap().len(),
-        30
-    );
+    let types = response["components"]["types"].as_array().unwrap();
+    let registry = xgc_world::builtin_registry().schema();
+    assert_eq!(types.len(), registry.types.len());
+    for (reported, registered) in types.iter().zip(&registry.types) {
+        assert_eq!(reported["id"], registered.id);
+        assert_eq!(reported["name"], registered.name.as_str());
+    }
     assert_eq!(response["world"]["entities"], 0);
     assert_eq!(
         response["capabilities"]["sim"],

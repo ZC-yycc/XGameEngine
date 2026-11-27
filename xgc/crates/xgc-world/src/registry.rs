@@ -4,9 +4,10 @@ use xgc_reflect::{Component, Registry};
 
 use super::{
     AnimationLayers, AnimationState, Animator, AudioGain, AudioListener, AudioMixer, AudioSource,
-    Bone, Camera, CharacterController, GlobalTransform, LodGroup, Material, MeshRenderer, Name,
-    Parent, ParticleEmitter, PhysicsBody, PluginComponent, PrefabInstance, Script, Skeleton,
-    SkeletonPose, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout, Velocity, World,
+    Bone, Camera, CharacterController, CollisionLayer, GlobalTransform, LodGroup, Material,
+    MeshRenderer, Name, Parent, ParticleEmitter, PhysicsBody, PluginComponent, PrefabInstance,
+    Script, Skeleton, SkeletonPose, Slope, Transform, UiElement, UiInput, UiInteraction, UiLayout,
+    Velocity, World,
 };
 
 macro_rules! builtin_components {
@@ -35,6 +36,7 @@ builtin_components![
     Name,
     Parent,
     GlobalTransform,
+    CollisionLayer,
     MeshRenderer,
     Material,
     Camera,

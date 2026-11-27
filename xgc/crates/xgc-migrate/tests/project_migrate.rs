@@ -161,7 +161,7 @@ fn reports_project_components_references_and_unmapped_fields() {
     let dry = migrate_old_project(&root, &out, true).unwrap().render();
     assert!(!out.exists());
     for expected in [
-        "components=18",
+        "components=19",
         "asset_references=4",
         "entity_references=2",
         "[migration.morph] Scenes/a.ron 实体 1",

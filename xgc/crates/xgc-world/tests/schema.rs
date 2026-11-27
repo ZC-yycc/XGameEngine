@@ -19,6 +19,7 @@ fn builtin_registry_has_stable_types() {
             "core.name",
             "core.parent",
             "core.global_transform",
+            "core.layer",
             "render.mesh",
             "render.material",
             "render.camera",

@@ -43,7 +43,7 @@ pub use character_components::{
 };
 pub use collision::CollisionEvent;
 pub use command::{Applied, Command, Plan};
-pub use components::{GlobalTransform, Name, Parent, Transform, Velocity};
+pub use components::{CollisionLayer, GlobalTransform, Name, Parent, Transform, Velocity};
 use data::ComponentFactory;
 pub use data::{ComponentData, EntityData, WorldData};
 pub use environment::{LightKind, SceneEnvironment, SceneLight};

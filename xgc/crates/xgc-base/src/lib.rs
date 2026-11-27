@@ -7,6 +7,7 @@
 #![deny(unsafe_code)]
 
 pub mod diagnostics;
+pub mod layer;
 pub mod path;
 pub mod render_settings;
 

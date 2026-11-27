@@ -1,6 +1,8 @@
 //! 旧场景顶层结构；字段只在本 crate 内使用。
 
 use serde::Deserialize;
+use xgc_base::layer::LayerIndex;
+use xgc_world::{CollisionLayer, ComponentData};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct OldScene {
@@ -95,11 +97,29 @@ pub(crate) struct OldEntity {
     /// 来源资产和文件内 ID 在项目迁移阶段一并重写。
     #[serde(default)]
     pub(crate) prefab: Option<OldPrefabRef>,
-    /// 旧场景的碰撞层（0..=31）；迁移不消费，项目检查用来点名越界值。
     #[serde(default)]
     pub(crate) layer: u8,
     pub(crate) transform: OldTransform,
     pub(crate) components: super::OldComponents,
+}
+
+impl OldEntity {
+    pub(crate) fn layer_index(&self) -> Result<LayerIndex, String> {
+        LayerIndex::new(self.layer).ok_or_else(|| {
+            format!(
+                "实体 {} 的 layer={} 超过 {}",
+                self.id.0,
+                self.layer,
+                LayerIndex::MAX
+            )
+        })
+    }
+
+    pub(crate) fn layer_component(&self) -> Result<Option<ComponentData>, String> {
+        let index = self.layer_index()?;
+        Ok((index != LayerIndex::default())
+            .then(|| ComponentData::from_component(&CollisionLayer { index })))
+    }
 }
 
 /// 旧场景实体上的预制体实例引用。

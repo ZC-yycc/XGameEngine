@@ -89,6 +89,46 @@ fn migrates_identity_transform_and_parent() {
 }
 
 #[test]
+fn migrates_nondefault_collision_layers() {
+    let scene = SCENE.replacen("layer: 0,", "layer: 31,", 1);
+    let (data, _) = migrate_str(&scene).unwrap();
+    let registry = xgc_world::builtin_registry();
+    let schema = registry.by_name("core.layer").expect("层必须出现在注册表");
+    let layer = xgc_world::ComponentId(schema.id);
+    let mut world = World::new();
+    world.restore_world_data(&data).unwrap();
+    assert_eq!(
+        world.get_field(data.entities[0].id, layer, "index"),
+        Some(Value::I64(31))
+    );
+    assert_eq!(world.get_field(data.entities[1].id, layer, "index"), None);
+
+    let revision = world.revision();
+    for value in [-1, 32] {
+        let plan = world.plan(vec![xgc_world::Command::SetField {
+            entity: data.entities[0].id,
+            component: layer,
+            field: "index".into(),
+            value: Value::I64(value),
+        }]);
+        assert!(world.apply(&plan).is_err());
+    }
+    assert_eq!(world.revision(), revision);
+    assert_eq!(
+        world.get_field(data.entities[0].id, layer, "index"),
+        Some(Value::I64(31))
+    );
+}
+
+#[test]
+fn rejects_out_of_range_collision_layers_before_producing_world_data() {
+    let scene = SCENE.replacen("layer: 0,", "layer: 32,", 1);
+    let err = migrate_str(&scene).unwrap_err().to_string();
+    assert!(err.contains("实体 1"), "{err}");
+    assert!(err.contains("32"), "{err}");
+}
+
+#[test]
 fn maps_mesh_material_and_camera() {
     let entries = r#"entries: [
                     (

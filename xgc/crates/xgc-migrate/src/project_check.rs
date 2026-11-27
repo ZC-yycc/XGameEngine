@@ -471,11 +471,10 @@ fn check_entity(
             ));
         }
     }
-    if entity.layer > 31 {
-        report.problems.push(format!(
-            "[scene.bad_layer] {rel}: 实体 {} 的 layer={} 超过 31",
-            entity.id.0, entity.layer
-        ));
+    if let Err(message) = entity.layer_index() {
+        report
+            .problems
+            .push(format!("[scene.bad_layer] {rel}: {message}"));
     }
     let transform = &entity.transform;
     if !transform.position.is_finite()

@@ -108,6 +108,12 @@ HUD 图片按项目相对路径或 GUID 从同一资产目录读取。GPU 回归
 
 `pack` 在目标同级目录组包，回读 JSON 与 XGCB 世界并校验清单及文件哈希，然后持有父目录的长期锁发布。写入失败保留可运行的上一版，下一次打包会先根据目录和事务标记恢复上次中断。回归覆盖并发发布、三个中断边界和无归属目录保护。恢复验收使用预置目录状态，适用范围是本地文件系统上的协作发布。[发布回归](crates/xgc-cli/tests/cooked_publish.rs)
 
+## 碰撞层实体字段
+
+旧场景和预制体的非零层号迁到 `core.layer:index`。层 0 保持省略，越界层号在旧项目检查和迁移时报告。Agent、Inspector 和数据恢复共用组件派生的 0–31 整数 schema。迁移回归验证层 31 可恢复、−1 和 32 的写操作被拒绝且不改变 revision。项目碰撞矩阵仍待接进求解器。
+
+工作区全目标检查与受影响包严格 Clippy 通过，227 项测试通过，另有 3 项忽略。两次 schema 导出逐字节相同，为 31 个组件、80,700 字节，仅新增 `core.layer`。原生 XGame 项目检查为 0 问题，showcase 的串行、四线程和参考轨迹一致，角色场景第 120 步快照逐字节一致。[迁移回归](crates/xgc-migrate/tests/migrate.rs) · [注册表回归](crates/xgc-world/tests/schema.rs)
+
 ## 项目画面设置
 
 迁移将旧项目的 `render` 和 `quality` 写进 `project.xgc`，组包时纳入 `cook.json` 签名。编辑器、播放器和 CLI 共用画面配置，覆盖曝光、色调映射、天空、光晕、FXAA、阴影软化、TAA、SSAO、LOD 偏置和画质档。MSAA 按设备能力选择 1× 或 4×。灯光显式设置的阴影分辨率优先，阴影采样与级联拟合使用实际附件尺寸。[画面设置](crates/xgc-base/src/render_settings.rs) · [GPU 曝光回归](crates/xgc-render/tests/exposure.rs)

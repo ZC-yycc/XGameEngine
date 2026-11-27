@@ -93,7 +93,7 @@ fn unmatched_fields(source: &str, scene: &OldScene) -> Vec<String> {
         let id = entity.id.0;
         if entity.layer != 0 {
             notes.push(format!(
-                "[migration.layer] {source} 实体 {id} 的 layer={} 需要重设碰撞过滤",
+                "[migration.layer] {source} 实体 {id} 的 layer={} 已迁移，项目碰撞过滤待接通",
                 entity.layer
             ));
         }
