@@ -159,7 +159,7 @@ fn scene(model: &Path, scale: [f32; 3], light_dir: [f32; 3], intensity: f32) -> 
             ..GlobalTransform::default()
         },
         MeshRenderer {
-            model: model.to_string_lossy().into_owned(),
+            model: model.file_name().unwrap().to_str().unwrap().to_owned(),
         },
         Material::default(),
     ));
