@@ -140,7 +140,7 @@ fn apply_values_rejects_structure_and_bad_asset_identity() {
     let asset_root = prefab.spawn((
         Transform::default(),
         Script {
-            path: "Scripts/initial.lua".into(),
+            paths: vec!["Scripts/initial.lua".into(), "Scripts/animate.lua".into()],
         },
         PluginComponent {
             registered_name: "initial".into(),
@@ -176,9 +176,10 @@ fn apply_values_rejects_structure_and_bad_asset_identity() {
         .get_mut::<PluginComponent>(root_key)
         .unwrap()
         .registered_name = "initial".into();
-    world.get_mut::<Script>(root_key).unwrap().path = "Scripts/different.lua".into();
+    world.get_mut::<Script>(root_key).unwrap().paths.swap(0, 1);
     assert!(apply_prefab_values(&world, &asset, root).is_err());
-    world.get_mut::<Script>(root_key).unwrap().path = "Scripts/initial.lua".into();
+    world.get_mut::<Script>(root_key).unwrap().paths.swap(0, 1);
+    assert!(apply_prefab_values(&world, &asset, root).is_ok());
 
     let extra = world.spawn((Parent { entity: root },));
     assert!(apply_prefab_values(&world, &asset, root).is_err());

@@ -1,7 +1,10 @@
 //! 内建注册表回归：CLI、Agent、Inspector 和世界组件工厂共用同一份声明。
 
 use xgc_base::EntityId;
-use xgc_world::{builtin_registry, ComponentData, ComponentId, EntityData, World};
+use xgc_world::{
+    builtin_registry, AssetKind, Command, Component, ComponentData, ComponentId, EntityData,
+    Script, Value, World,
+};
 
 #[test]
 fn builtin_registry_has_stable_types() {
@@ -81,4 +84,55 @@ fn builtin_schema_defaults_can_construct_every_component() {
             );
         }
     }
+}
+
+#[test]
+fn script_mounts_are_editable_asset_references_in_author_order() {
+    let schema = builtin_registry().schema();
+    let script = schema
+        .types
+        .iter()
+        .find(|ty| ty.id == Script::ID.0)
+        .unwrap();
+    let [field] = script.fields.as_slice() else {
+        panic!("Lua 组件只声明有序挂载字段");
+    };
+    assert_eq!(field.name, "paths");
+    assert_eq!(field.default, Value::List(vec![]));
+    assert_eq!(
+        field.element.as_ref().unwrap().asset,
+        Some(AssetKind::Script)
+    );
+
+    let first = "Scripts/start.lua";
+    let second = "guid://0123456789abcdef";
+    let mut world = World::new();
+    let key = world.spawn((Script {
+        paths: vec![first.into(), "Scripts/before.lua".into()],
+    },));
+    let entity = world.entity(key).unwrap();
+    let plan = world.plan(vec![Command::SetField {
+        entity,
+        component: Script::ID,
+        field: "paths[1]".into(),
+        value: Value::String(second.into()),
+    }]);
+    let edit = world.apply(&plan).unwrap();
+    let data = world.entity_data(entity).unwrap();
+    let mut references = Vec::new();
+    script.visit_asset_references(&data.components[0].fields, |kind, path, reference| {
+        references.push((kind, path.to_owned(), reference.to_owned()));
+    });
+    assert_eq!(
+        references,
+        [
+            (AssetKind::Script, "paths[0]".into(), first.into()),
+            (AssetKind::Script, "paths[1]".into(), second.into()),
+        ]
+    );
+    world.revert(&edit).unwrap();
+    assert_eq!(
+        world.get::<Script>(key).unwrap().paths,
+        [first, "Scripts/before.lua"]
+    );
 }

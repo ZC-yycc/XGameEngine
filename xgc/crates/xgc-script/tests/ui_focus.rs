@@ -83,7 +83,7 @@ fn run(body: &str) -> (World, Vec<xgc_base::EntityKey>, Option<String>) {
             value: "driver".to_string(),
         },
         Script {
-            path: "focus.lua".to_string(),
+            paths: vec!["focus.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);
@@ -153,7 +153,7 @@ fn ui_set_focus_survives_into_the_next_frame_view() {
             value: "driver".to_string(),
         },
         Script {
-            path: "focus.lua".to_string(),
+            paths: vec!["focus.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);

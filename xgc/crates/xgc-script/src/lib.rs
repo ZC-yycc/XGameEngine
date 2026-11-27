@@ -287,10 +287,6 @@ impl LuaHost {
         self.call_hook("on_update", dt)
     }
 
-    pub fn destroy(&self) -> Result<bool, String> {
-        self.call_hook("on_destroy", 0.0)
-    }
-
     fn register_world(&self, world: &Rc<RefCell<World>>) -> Result<(), String> {
         let api = self
             .lua

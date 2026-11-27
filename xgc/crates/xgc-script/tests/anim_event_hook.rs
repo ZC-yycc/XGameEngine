@@ -31,7 +31,7 @@ fn animation_events_reach_the_script_hook() {
         Transform::default(),
         Velocity::default(),
         Script {
-            path: "anim.lua".to_string(),
+            paths: vec!["anim.lua".into()],
         },
     ));
     let id = world.entity(entity).unwrap();

@@ -1,5 +1,5 @@
 {
-  "format_version": 5,
+  "format_version": 6,
   "kind": "world",
   "payload": {
     "revision": 10950,
@@ -1042,10 +1042,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "guid://3f3d4e9022e87bbfb39cb545d47fafa5"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "guid://3f3d4e9022e87bbfb39cb545d47fafa5"
+                    }
+                  ]
                 }
               ]
             ]
@@ -1354,10 +1359,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "guid://036592f00d77acad5ddd43913b3c90d8"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "guid://036592f00d77acad5ddd43913b3c90d8"
+                    }
+                  ]
                 }
               ]
             ]
@@ -2821,10 +2831,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "guid://58a14f446aa341711d5d7b75806b8ecc"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "guid://58a14f446aa341711d5d7b75806b8ecc"
+                    }
+                  ]
                 }
               ]
             ]
@@ -5235,10 +5250,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "guid://26b3edbff208b5e461decb83166b5c4d"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "guid://26b3edbff208b5e461decb83166b5c4d"
+                    }
+                  ]
                 }
               ]
             ]
@@ -6366,10 +6386,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "guid://b7c1d4e28f3a49c6a1e5d0f7b2c84a19"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "guid://b7c1d4e28f3a49c6a1e5d0f7b2c84a19"
+                    }
+                  ]
                 }
               ]
             ]

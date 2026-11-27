@@ -185,7 +185,7 @@ mod tests {
         .unwrap();
         let mut world = World::new();
         world.spawn((Script {
-            path: "tone.lua".into(),
+            paths: vec!["tone.lua".into()],
         },));
         let path = root.join("scene.json");
         xgc_store::save_world(&path, &world.world_data()).unwrap();

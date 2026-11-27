@@ -22,7 +22,7 @@ impl InputScript {
             Transform::default(),
             Velocity::default(),
             Script {
-                path: "input.lua".to_string(),
+                paths: vec!["input.lua".into()],
             },
         ));
         let (runner, _) =

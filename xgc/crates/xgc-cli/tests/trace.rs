@@ -78,7 +78,7 @@ fn scripted_world_with(label: &str, lua: &str) -> (PathBuf, PathBuf) {
     world.spawn((
         Transform::default(),
         xgc_world::Script {
-            path: "move.lua".to_string(),
+            paths: vec!["move.lua".into()],
         },
     ));
     save_world(&path, &world.world_data()).unwrap();

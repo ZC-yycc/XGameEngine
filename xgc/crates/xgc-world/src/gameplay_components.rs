@@ -80,53 +80,11 @@ pub struct ListenerPose {
     pub forward: [f32; 3],
 }
 
-/// 脚本引用：项目相对路径；M1 只迁移 / 存盘，Lua 运行时后续接。
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Component)]
+#[component(id = 0x0301, name = "script.lua", doc = "按挂载顺序派发的 Lua 脚本")]
 pub struct Script {
-    pub path: String,
-}
-
-impl Component for Script {
-    const ID: ComponentId = ComponentId(0x0301);
-    const NAME: &'static str = "script.lua";
-
-    fn default_value() -> Self {
-        Self::default()
-    }
-
-    fn doc() -> &'static str {
-        "脚本路径；单轨只认 .lua"
-    }
-
-    fn fields() -> Vec<FieldDescriptor> {
-        vec![
-            FieldDescriptor::new("path", FieldType::String, Value::String(String::new()))
-                .asset(AssetKind::Script)
-                .doc("项目相对路径或 GUID"),
-        ]
-    }
-
-    fn get_field(&self, field: &str) -> Option<Value> {
-        match field {
-            "path" => Some(Value::String(self.path.clone())),
-            _ => None,
-        }
-    }
-
-    fn set_field(&mut self, field: &str, value: &Value) -> Result<(), String> {
-        match field {
-            "path" => {
-                self.path = value
-                    .as_string()
-                    .ok_or_else(|| {
-                        format!("script.lua.path 期望 string，得到 {}", value.type_name())
-                    })?
-                    .to_string();
-                Ok(())
-            }
-            _ => Err(format!("script.lua 没有字段 {field}")),
-        }
-    }
+    #[field(asset = Script, doc = "Lua 脚本的项目相对路径或 GUID，空列表表示无挂载")]
+    pub paths: Vec<String>,
 }
 
 /// 音频源：剪辑 + 播放参数；总线 / 距离衰减等完整参数后续扩展。

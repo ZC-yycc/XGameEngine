@@ -228,8 +228,13 @@ impl FieldDescriptor {
         self
     }
 
+    /// 同质容器的资产用途属于元素，供嵌套字段编辑和引用遍历共用。
     pub fn asset(mut self, asset: AssetKind) -> Self {
-        self.asset = Some(asset);
+        let mut field = &mut self;
+        while let FieldType::List(element) | FieldType::Map(element) = &mut field.ty {
+            field = element;
+        }
+        field.asset = Some(asset);
         self
     }
 

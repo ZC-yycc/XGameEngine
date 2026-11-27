@@ -31,7 +31,7 @@ fn collision_hooks_receive_the_other_entity_and_entity_name() {
         Transform::default(),
         Velocity::default(),
         Script {
-            path: "hit.lua".to_string(),
+            paths: vec!["hit.lua".into()],
         },
     ));
     let id = world.entity(entity).unwrap();

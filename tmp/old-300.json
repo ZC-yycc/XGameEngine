@@ -1,5 +1,5 @@
 {
-  "format_version": 5,
+  "format_version": 6,
   "kind": "world",
   "payload": {
     "revision": 0,
@@ -1042,10 +1042,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "Scripts/Spinner.lua"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "Scripts/Spinner.lua"
+                    }
+                  ]
                 }
               ]
             ]
@@ -1330,10 +1335,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "Scripts/Jumper.lua"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "Scripts/Jumper.lua"
+                    }
+                  ]
                 }
               ]
             ]
@@ -3206,10 +3216,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "Scripts/FoxLocomotion.lua"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "Scripts/FoxLocomotion.lua"
+                    }
+                  ]
                 }
               ]
             ]
@@ -4976,10 +4991,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "Scripts/HudDemo.lua"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "Scripts/HudDemo.lua"
+                    }
+                  ]
                 }
               ]
             ]
@@ -5770,10 +5790,15 @@
             "component": 769,
             "fields": [
               [
-                "path",
+                "paths",
                 {
-                  "kind": "string",
-                  "value": "Scripts/CameraFollow.lua"
+                  "kind": "list",
+                  "value": [
+                    {
+                      "kind": "string",
+                      "value": "Scripts/CameraFollow.lua"
+                    }
+                  ]
                 }
               ]
             ]

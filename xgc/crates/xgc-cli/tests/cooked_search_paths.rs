@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use xgc_store::{
-    save_project, save_world, ProjectContent, ProjectManifest, PROJECT_FORMAT_VERSION,
+    load_world, save_project, save_world, ProjectContent, ProjectManifest, PROJECT_FORMAT_VERSION,
 };
-use xgc_world::{MeshRenderer, Script, Transform, World};
+use xgc_world::{MeshRenderer, Name, Script, Transform, World};
 
 #[test]
 fn cooked_run_uses_the_same_ordered_search_roots_as_the_project() {
@@ -45,28 +45,42 @@ fn cooked_run_uses_the_same_ordered_search_roots_as_the_project() {
     save_project(&source.join("project.xgc"), &project).unwrap();
     fs::write(
         source.join("Zulu/move.lua"),
-        "function update(ctx) set_pos(ctx, 3, 0, 0) end",
+        "function update(ctx)\n  xgc.set(self_id(ctx), 'core.name', 'value', 'moved')\n  set_pos(ctx, 3, 0, 0)\nend",
     )
     .unwrap();
     fs::write(source.join("Alpha/move.lua"), "local =").unwrap();
+    fs::write(
+        source.join("Alpha/finish.lua"),
+        "function update(ctx) set_pos(ctx, 7, 0, 0) end",
+    )
+    .unwrap();
+    fs::write(
+        source.join("Alpha/finish.lua.meta"),
+        r#"(guid: "aabb1234")"#,
+    )
+    .unwrap();
     fs::write(source.join("Alpha/model.glb"), "model fixture").unwrap();
     fs::write(source.join("Config/actions.ron"), "(actions: {}, axes: {})").unwrap();
     fs::write(source.join("input.ron"), "unused").unwrap();
     let mut world = World::new();
-    world.spawn((
+    let key = world.spawn((
         Transform::default(),
+        Name::default(),
         Script {
-            path: "move.lua".into(),
+            paths: vec!["move.lua".into(), "guid://aabb1234".into()],
         },
         MeshRenderer {
             model: "model.glb".into(),
         },
     ));
+    let entity = world.entity(key).unwrap();
     let scene = source.join(&project.entry_scene);
     save_world(&scene, &world.world_data()).unwrap();
 
     success(xgc().arg("pack").args([&scene, &source, &cooked]));
     assert!(cooked.join("Zulu/move.lua").is_file());
+    assert!(cooked.join("Alpha/finish.lua").is_file());
+    assert!(cooked.join("Alpha/finish.lua.meta").is_file());
     assert!(cooked.join("Alpha/model.glb").is_file());
     assert!(cooked.join("Config/actions.ron").is_file());
     assert!(!cooked.join("Alpha/move.lua").exists());
@@ -84,10 +98,26 @@ fn cooked_run_uses_the_same_ordered_search_roots_as_the_project() {
     success(xgc().arg("pack").args([&scene, &source, &cooked]));
     assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
 
-    let expected = success(xgc().arg("run-scripts").args([&scene, &source]).arg("1"));
+    let snapshot = fixture.0.join("snapshot.json");
+    let expected = success(
+        xgc()
+            .arg("run-scripts")
+            .args([&scene, &source])
+            .arg("1")
+            .arg(&snapshot),
+    );
+    world
+        .restore_world_data(&load_world(&snapshot).unwrap())
+        .unwrap();
+    let key = world.key(entity).unwrap();
+    assert_eq!(world.get::<Name>(key).unwrap().value, "moved");
+    assert_eq!(
+        world.get::<Transform>(key).unwrap().position,
+        [7.0, 0.0, 0.0]
+    );
     fs::rename(&source, fixture.0.join("relocated")).unwrap();
     let actual = success(xgc().arg("run-cooked").arg(&cooked).arg("1"));
-    assert!(actual.contains("scripts=1"), "{actual}");
+    assert!(actual.contains("scripts=2"), "{actual}");
     assert_eq!(hash(&actual), hash(&expected));
 
     let mut changed: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
@@ -111,7 +141,10 @@ fn xgc() -> Command {
 }
 
 fn hash(output: &str) -> &str {
-    output.trim_end().rsplit_once("hash=").unwrap().1
+    output
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("hash="))
+        .unwrap()
 }
 
 fn success(command: &mut Command) -> String {

@@ -42,7 +42,7 @@ fn runtime_limits_each_hook_and_reuses_the_vm_after_a_failure() {
         Transform::default(),
         Velocity::default(),
         Script {
-            path: "budget.lua".into(),
+            paths: vec!["budget.lua".into()],
         },
     ));
     let mut runtime = ScriptRuntime::new(&dir);

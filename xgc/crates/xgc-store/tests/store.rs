@@ -66,7 +66,7 @@ fn prefab_uses_its_own_envelope_kind() {
     save_prefab(&prefab, &data).unwrap();
     save_world(&scene, &data).unwrap();
     let document: serde_json::Value = serde_json::from_slice(&fs::read(&prefab).unwrap()).unwrap();
-    assert_eq!(document["format_version"], 5);
+    assert_eq!(document["format_version"], 6);
     assert_eq!(document["kind"], "prefab");
     assert_eq!(load_prefab(&prefab).unwrap(), data);
     assert_eq!(load_world(&scene).unwrap(), data);
@@ -123,7 +123,7 @@ fn previous_json_envelope_version_is_rejected() {
     for path in [&world, &prefab, &journal] {
         let mut document: serde_json::Value =
             serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        document["format_version"] = 4.into();
+        document["format_version"] = 5.into();
         fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
     }
     let errors = [
@@ -134,7 +134,7 @@ fn previous_json_envelope_version_is_rejected() {
     fs::remove_dir_all(dir).unwrap();
     for (kind, error) in ["world", "prefab", "journal"].into_iter().zip(errors) {
         assert!(
-            matches!(error, Some(xgc_store::StoreError::Format(ref message)) if message.contains("格式版本 4")),
+            matches!(error, Some(xgc_store::StoreError::Format(ref message)) if message.contains("格式版本 5")),
             "{kind}: {error:?}"
         );
     }

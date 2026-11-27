@@ -68,8 +68,8 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-cli/tests/trace.rs` | 逐帧 trace 集成回归：与进程内重放逐步对表 / 两次运行逐字节相同 / 不同世界第 0 帧即不同 / 参数错误退出码 2 / 汇总行与 `run-world` 末行逐字一致 / 带资产根时第 1 帧起与无脚本路径分叉且汇总行与 `run-scripts` 末行逐字一致 / 坏脚本与 `update` 期抛错都退出码 2 且点名出错帧 |
 | `crates/xgc-cli/tests/gate.rs` | 割接门禁集成回归：参考匹配通过 / 哈希分歧退出码 1 并点名帧 / 空参考目录退出码 2 / 参考帧号不从 0 开始退出码 2 |
 | `crates/xgc-sim/tests/steady_state.rs` | 线程本地分配计数：仿真整帧预算、混合串行批和 AABB、名字与刚体哈希、1 万乱序实体哈希。实测见 [CUTOVER.md](CUTOVER.md)。另有一条 release 吞吐用例默认 `#[ignore]` |
-| `crates/xgc-store/src/lib.rs` | JSON 包络 v5、原子写、WorldData / Prefab / Journal 存取 |
-| `crates/xgc-store/src/binary.rs` | `XGCB` v6 二进制世界：encode / decode / save / load；固定小端、递归值带标签；映射和枚举分别用 11 和 12，沿用原有递归深度限额 |
+| `crates/xgc-store/src/lib.rs` | JSON 包络 v6、原子写、WorldData / Prefab / Journal 存取 |
+| `crates/xgc-store/src/binary.rs` | `XGCB` v7 二进制世界：encode / decode / save / load；固定小端、递归值带标签；映射和枚举分别用 11 和 12，沿用原有递归深度限额 |
 | `crates/xgc-sim/src/schedule.rs` | 执行计划与调度器：连续分批、宿主阶段、`run_plan_threaded` / 分区执行（`supports_parted` 的系统并行、其余串行；默认 1 线程）；回归 `crates/xgc-sim/tests/parallel_batch.rs` |
 | `crates/xgc-sim/src/lib.rs` | `Simulation` / `Trace` / `play` / `verify` / `set_ui_input` / `step_with`（调度器 / 场景 / 错误已拆到 `schedule.rs` / `scenario.rs` / `error.rs`） |
 | `crates/xgc-sim/tests/schedule_plan.rs` | 执行计划回归：连续批次、同批两两无冲突、摊平 == 注册顺序、宿主阶段位置（插在首个 `runs_after_host` 系统之前）、构造时固化计划 |
@@ -112,9 +112,9 @@ cargo run -q --release -p xgc-cli --offline -- bench
 | `crates/xgc-script/tests/anim_layers.rs` | 脚本混合层回归：同帧权重和参数累积 / 按名 setter 与动态路径按序执行 / 权重钳制、缺层与非有限值静默 |
 | `crates/xgc-script/tests/anim_event_hook.rs` | 动画事件钩子回归：`on_anim_event` 收到事件名并写速度 / 不匹配名字不写 |
 | `crates/xgc-sim/tests/animator_events.rs` | 动画事件运行时回归：跨帧只触发一次 / 循环跨圈命中 / 非循环不重复 |
-| `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` / `fixed_update(ctx)` / `on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)` / `on_anim_event(ctx, name)` 生命周期分派与回退；每次调用前 `reset_budget()`，`fixed_update` 每个固定步一次且不传 dt（dt 走 `delta(ctx)`），碰撞钩子多传对方 `EntityId`，动画钩子多传事件名 |
+| `crates/xgc-script/src/lifecycle.rs` | `start(ctx)` / `update(ctx)` / `fixed_update(ctx)` / `on_destroy(ctx)` / `on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)` / `on_anim_event(ctx, name)` 生命周期分派；每次调用独立计指令预算，固定步长由 `delta(ctx)` 读取，碰撞和动画事件另传对方 ID 或事件名 |
 | `crates/xgc-script/src/character_api.rs` | 角色脚本 API：`axis`（读 `ScriptView.axes`，编辑器按 `input.ron` 的轴桥）、`character_is_grounded` / `character_velocity`（读快照）、`character_simple_move`（写 `Velocity.linear` 水平两轴，缺组件先 `AddComponent`，同帧查队列去重）、`character_jump`（仅 grounded 时写 `jump_velocity` + `jump`）；写操作全部走帧末命令队列 |
-| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按 `script.lua` 驱动实体、每帧 `ScriptView` 快照、动作输入桥 `set_action`、命令结算、GUID 脚本经 `AssetCatalog` 解析、实体移除清理、磁盘热重载；`run_frame` 在 update/fixed_update 之后消费 `World::collision_events()` 派发 `on_collision_enter/exit`，再消费 `World::animation_events()` 派发 `on_anim_event`，命令并进同一帧结算；`take_error()` 把本帧第一处脚本错误交给宿主（只打 stderr 时宿主看不到失败） |
+| `crates/xgc-script/src/runtime.rs` | `ScriptRuntime`：按持久实体 ID 和 `script.lua.paths` 挂载顺序派发，每个挂载独立 Lua 状态；卸载先派发 `on_destroy`，保留对存活实体的写入。`run_frame` 在 update/fixed_update 后依次派发碰撞与动画事件，命令同一帧结算。`take_error()` 将本帧第一处脚本错误交给宿主 |
 | `crates/xgc-editor/src/lib.rs` | 编辑器无头状态：打开 / 保存 / 实体列表 / Inspector / Play / Undo/Redo / demo / 轨道相机 / 项目场景切换（脏场景与 Play 期间拒绝） |
 | `crates/xgc-editor/src/scene_ops.rs` | 项目场景切换：清单登记名 → 场景世界；脏场景与 Play 期间拒绝，切换后清空选择 / 撤销 / 重做 |
 | `crates/xgc-editor/src/assets_ops.rs` | `EditorState::assets()`：只读扫描清单内容目录，规范化与去重、确定性截断、隐藏 / 链接 / `.meta` 排除；不生成元数据 |

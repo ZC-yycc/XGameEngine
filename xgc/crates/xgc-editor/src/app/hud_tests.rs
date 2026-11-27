@@ -51,7 +51,7 @@ fn hud_click_between_fixed_steps_reaches_the_script_once() {
         UiLayout::default(),
         UiInteraction::default(),
         Script {
-            path: "button.lua".into(),
+            paths: vec!["button.lua".into()],
         },
     ));
     let entity = world.entity(key).unwrap();

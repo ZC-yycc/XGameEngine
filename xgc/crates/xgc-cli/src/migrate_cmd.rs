@@ -45,9 +45,6 @@ pub(crate) fn migrate(input: Option<&str>, output: Option<&str>, flag: Option<&s
                     batch.failures.len(),
                     output
                 );
-                for note in &batch.unmatched {
-                    println!("  migration: {note}");
-                }
                 if batch.failures.is_empty() {
                     ExitCode::SUCCESS
                 } else {
@@ -90,9 +87,6 @@ pub(crate) fn migrate(input: Option<&str>, output: Option<&str>, flag: Option<&s
         report.mapped_components,
         report.missing_parents,
     );
-    for note in report.unmatched(input) {
-        println!("  migration: {note}");
-    }
     ExitCode::SUCCESS
 }
 

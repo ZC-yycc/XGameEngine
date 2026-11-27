@@ -45,7 +45,7 @@ fn run(body: &str, frames: usize) -> (World, Option<String>) {
             value: "driver".to_string(),
         },
         Script {
-            path: "spawn.lua".to_string(),
+            paths: vec!["spawn.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);

@@ -61,7 +61,7 @@ fn run(
             value: "driver".to_string(),
         },
         Script {
-            path: "image.lua".to_string(),
+            paths: vec!["image.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);

@@ -15,8 +15,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use xgc_world::{Journal, WorldData};
 
-// 动画混合层直接存储为结构化列表。
-const FORMAT_VERSION: u32 = 5;
+// Lua 挂载按列表顺序保存，世界、预制体和日志共享此字段结构。
+const FORMAT_VERSION: u32 = 6;
 
 mod binary;
 pub use binary::{decode_world, encode_world, load_world_binary, save_world_binary};

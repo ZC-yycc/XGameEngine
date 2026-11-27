@@ -3,7 +3,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use xgc_editor::EditorState;
-use xgc_reflect::Value;
+use xgc_reflect::{Component, Value};
 use xgc_sim::{InputState, KeyCode};
 use xgc_store::{save_project, save_world, ProjectContent, ProjectManifest};
 use xgc_world::{Name, Script, Transform, World};
@@ -45,7 +45,7 @@ end
         },
         Transform::default(),
         Script {
-            path: "guid://move-script".into(),
+            paths: vec!["guid://move-script".into()],
         },
     ));
     let entity = world.entity(key).unwrap();
@@ -125,14 +125,49 @@ end
     assert_eq!(reloaded.project_name(), Some("demo"));
     assert_eq!(reloaded.entity_position(entity), Some([1.0, 2.0, 3.0]));
 
-    world.get_mut::<Script>(key).unwrap().path = "move.lua".into();
+    world.get_mut::<Script>(key).unwrap().paths = vec!["move.lua".into()];
     save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();
     std::fs::write(&script, "function update(ctx) set_pos(ctx, 4, 0, 0) end").unwrap();
     manifest.search_paths = vec!["Scripts".into()];
     save_project(&manifest_path, &manifest).unwrap();
+    std::fs::write(
+        dir.join("Scripts/finish.lua"),
+        "function update(ctx) xgc.set(self_id(ctx), 'core.name', 'value', 'done') end",
+    )
+    .unwrap();
+    let mut fallback = EditorState::open(&dir).unwrap();
+    fallback
+        .edit_field(
+            entity,
+            Script::ID.0,
+            "paths",
+            Value::List(vec![
+                Value::String("move.lua".into()),
+                Value::String("finish.lua".into()),
+            ]),
+        )
+        .unwrap();
+    fallback.save().unwrap();
     let mut fallback = EditorState::open(&dir).unwrap();
     fallback.play().unwrap();
     fallback.advance_play(fixed).unwrap();
     assert_eq!(fallback.entity_position(entity), Some([4.0, 0.0, 0.0]));
+    let played = fallback.world();
+    assert_eq!(
+        played
+            .get::<Name>(played.key(entity).unwrap())
+            .unwrap()
+            .value,
+        "done"
+    );
+    fallback.stop();
+    let edited = fallback.world();
+    assert_eq!(
+        edited
+            .get::<Name>(edited.key(entity).unwrap())
+            .unwrap()
+            .value,
+        "hero"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }

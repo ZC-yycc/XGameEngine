@@ -189,7 +189,7 @@ fn save_scene(path: &Path, scripts: &[&str]) {
     for path in scripts {
         world.spawn((
             Script {
-                path: (*path).into(),
+                paths: vec![(*path).into()],
             },
             Transform::default(),
         ));

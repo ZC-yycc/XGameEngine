@@ -15,14 +15,19 @@ fn runs_cooked_world_and_scripts() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("move.lua"),
-        "function update(ctx)\n  local p = entity_pos(ctx, self_id(ctx))\n  set_pos(ctx, p.x + 1.0, p.y, p.z)\nend\n",
+        "function update(ctx)\n  xgc.set(self_id(ctx), 'core.transform', 'scale', {x=2, y=2, z=2})\n  set_pos(ctx, 3, 0, 0)\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("finish.lua"),
+        "function update(ctx) set_pos(ctx, 7, 0, 0) end",
     )
     .unwrap();
     let mut world = World::new();
     let key = world.spawn((
         Transform::default(),
         Script {
-            path: "move.lua".to_string(),
+            paths: vec!["move.lua".into(), "finish.lua".into()],
         },
     ));
     let id = world.entity(key).unwrap();
@@ -30,11 +35,15 @@ fn runs_cooked_world_and_scripts() {
     let stats = xgc_player::run_cooked(&dir, 3).unwrap();
     assert_eq!(stats.frames, 3);
     assert_eq!(stats.entities, 1);
-    assert_eq!(stats.scripts, 1);
+    assert_eq!(stats.scripts, 2);
     let reloaded = xgc_store::load_world(&dir.join("world.json")).unwrap();
-    let mut check = World::new();
-    check.restore_world_data(&reloaded).unwrap();
-    assert!(check.entity_data(id).is_some());
+    let mut expected = World::new();
+    expected.restore_world_data(&reloaded).unwrap();
+    let target = expected.key(id).unwrap();
+    let transform = expected.get_mut::<Transform>(target).unwrap();
+    transform.position = [7.0, 0.0, 0.0];
+    transform.scale = [2.0; 3];
+    assert_eq!(stats.state_hash, expected.state_hash());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -56,7 +65,7 @@ fn headless_player_reports_the_frame_and_script_error() {
     .unwrap();
     let mut world = World::new();
     world.spawn((Script {
-        path: "broken.lua".into(),
+        paths: vec!["broken.lua".into()],
     },));
     xgc_store::save_world(&dir.join("world.json"), &world.world_data()).unwrap();
     let result = xgc_player::run_cooked(&dir, 3);
@@ -154,7 +163,7 @@ fn selects_a_named_scene_from_the_project_manifest() {
     world.spawn((
         Transform::default(),
         Script {
-            path: "Scripts/move.lua".to_string(),
+            paths: vec!["Scripts/move.lua".into()],
         },
     ));
     xgc_store::save_world(&dir.join("scenes/main.json"), &world.world_data()).unwrap();

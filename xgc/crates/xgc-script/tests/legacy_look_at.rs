@@ -32,7 +32,7 @@ fn legacy_look_at_aims_forward_without_roll() {
             ..Transform::default()
         },
         Script {
-            path: "aim.lua".to_string(),
+            paths: vec!["aim.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);

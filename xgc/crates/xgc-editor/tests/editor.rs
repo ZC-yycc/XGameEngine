@@ -272,7 +272,7 @@ fn editor_play_runs_scripts_and_reads_input() {
     let entity = world.spawn((
         Transform::default(),
         Script {
-            path: "move.lua".to_string(),
+            paths: vec!["move.lua".into()],
         },
     ));
     let id = world.entity(entity).unwrap();

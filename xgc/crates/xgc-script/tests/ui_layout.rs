@@ -38,7 +38,7 @@ fn spawn(world: &mut World) -> xgc_base::EntityKey {
             ..Default::default()
         },
         Script {
-            path: "ui.lua".to_string(),
+            paths: vec!["ui.lua".into()],
         },
     ))
 }

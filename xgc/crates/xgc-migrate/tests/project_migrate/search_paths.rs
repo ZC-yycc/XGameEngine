@@ -120,12 +120,12 @@ fn copies_search_roots_in_place_and_preserves_asset_references() {
     let direct = world.key(data.entities[0].id).unwrap();
     let fallback = world.key(data.entities[1].id).unwrap();
     assert_eq!(
-        world.get::<Script>(direct).unwrap().path,
-        "Scripts/main.lua"
+        world.get::<Script>(direct).unwrap().paths,
+        ["Scripts/main.lua"]
     );
     assert_eq!(
-        world.get::<Script>(fallback).unwrap().path,
-        "Scripts/fallback.lua"
+        world.get::<Script>(fallback).unwrap().paths,
+        ["Scripts/fallback.lua"]
     );
     assert_eq!(
         world.get::<MeshRenderer>(direct).unwrap().model,

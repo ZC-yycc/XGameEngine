@@ -41,6 +41,26 @@ pub struct ComponentData {
     pub fields: Vec<(String, Value)>,
 }
 
+impl ComponentData {
+    /// 用组件自己的反射声明构造持久化 / 命令数据。
+    pub fn from_component<T: Component>(component: &T) -> Self {
+        let fields = T::fields()
+            .into_iter()
+            .map(|field| {
+                let name = field.name;
+                let value = component
+                    .get_field(name)
+                    .unwrap_or_else(|| panic!("{} 未提供已声明的字段 {name}", T::NAME));
+                (name.to_owned(), value)
+            })
+            .collect();
+        Self {
+            component: T::ID,
+            fields,
+        }
+    }
+}
+
 /// 可序列化的整个世界：实体按 `EntityId` 排序，便于逐字节比较。
 ///
 /// `environment` 是场景级环境（光 / 环境光）；缺省环境不落盘，因此没有光源的

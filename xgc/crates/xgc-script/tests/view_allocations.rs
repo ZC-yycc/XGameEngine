@@ -113,7 +113,7 @@ fn script_reads_live_pose_and_name_with_bounded_frame_allocations() {
     let actor = world.spawn((
         Transform::default(),
         Script {
-            path: "follow.lua".into(),
+            paths: vec!["follow.lua".into()],
         },
     ));
     std::fs::write(
@@ -188,7 +188,7 @@ fn refreshed_rows_clear_removed_components_and_use_the_reserved_cursor() {
     ));
     let target_id = world.entity(target).unwrap();
     world.spawn((Script {
-        path: "inspect.lua".into(),
+        paths: vec!["inspect.lua".into()],
     },));
     let next_id = world.reserve_entity_ids(64) + 64;
     std::fs::write(

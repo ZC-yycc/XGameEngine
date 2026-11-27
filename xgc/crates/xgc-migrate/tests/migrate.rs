@@ -3,7 +3,7 @@
 use xgc_migrate::{migrate_str, MigrationError};
 use xgc_world::{
     AudioSource, Camera, Component, GlobalTransform, Material, MeshRenderer, Name, Parent,
-    PhysicsBody, Script, Transform, Value,
+    PhysicsBody, Script, Transform, Value, World,
 };
 
 const SCENE: &str = r#"(
@@ -142,6 +142,56 @@ fn maps_mesh_material_and_camera() {
 }
 
 #[test]
+fn maps_all_lua_attachments_in_order() {
+    let entries = r#"entries: [
+        (identity: (id: 8), data: Lua(path: "Scripts/first.lua")),
+        (identity: (id: 2), data: Mesh((model: "builtin://cube"))),
+        (identity: (id: 6), data: Lua(path: "guid://0123456789abcdef")),
+        (identity: (id: 4), data: Lua(path: "Scripts/last.lua")),
+    ],"#;
+    let (world, report) = migrate_str(&SCENE.replacen("entries: [],", entries, 1)).unwrap();
+    let scripts: Vec<_> = world.entities[0]
+        .components
+        .iter()
+        .filter(|component| component.component == Script::ID)
+        .collect();
+    assert_eq!(scripts.len(), 1);
+    assert_eq!(
+        scripts[0].fields,
+        [(
+            "paths".to_owned(),
+            Value::List(
+                [
+                    "Scripts/first.lua",
+                    "guid://0123456789abcdef",
+                    "Scripts/last.lua"
+                ]
+                .map(|path| Value::String(path.to_owned()))
+                .into(),
+            ),
+        )],
+    );
+    assert_eq!(report.mapped_components, 2);
+    assert!(!world.entities[1]
+        .components
+        .iter()
+        .any(|component| component.component == Script::ID));
+}
+
+#[test]
+fn rejects_the_same_lua_path_twice_on_one_entity() {
+    let entries = r#"entries: [
+        (identity: (id: 2), data: Lua(path: "Scripts/player.lua")),
+        (identity: (id: 3), data: Lua(path: "Scripts/player.lua")),
+    ],"#;
+    let error = migrate_str(&SCENE.replacen("entries: [],", entries, 1)).unwrap_err();
+    assert!(
+        matches!(&error, MigrationError::Parse(message) if message.contains("Scripts/player.lua") && message.contains("重复挂载")),
+        "{error}"
+    );
+}
+
+#[test]
 fn maps_script_and_audio() {
     let entries = r#"entries: [
                     (
@@ -171,8 +221,11 @@ fn maps_script_and_audio() {
         .find(|component| component.component == Script::ID)
         .unwrap();
     assert_eq!(
-        script.fields[0].1,
-        Value::String("Scripts/player.lua".to_string())
+        script.fields,
+        [(
+            "paths".into(),
+            Value::List(vec![Value::String("Scripts/player.lua".into())]),
+        )],
     );
     let audio = root
         .components
@@ -262,8 +315,7 @@ fn migrate_dir_writes_each_scene_and_reports_failures() {
         r#"entries: [(data: Lua(path: "first.lua")), (data: Lua(path: "last.lua"))],"#,
         1,
     );
-    let source = input.join("good.ron");
-    std::fs::write(&source, scripted).unwrap();
+    std::fs::write(input.join("good.ron"), scripted).unwrap();
     std::fs::write(
         input.join("bad.ron"),
         SCENE.replace("format_version: 2", "format_version: 1"),
@@ -275,11 +327,15 @@ fn migrate_dir_writes_each_scene_and_reports_failures() {
     assert_eq!(batch.entities, 2);
     assert_eq!(batch.mapped_components, 1);
     assert_eq!(batch.failures.len(), 1);
-    assert_eq!(batch.unmatched.len(), 1);
-    assert!(batch.unmatched[0].contains(source.to_string_lossy().as_ref()));
-    assert!(batch.unmatched[0].contains("实体 1 保留 \"last.lua\"，未挂载 [\"first.lua\"]"));
     let migrated = xgc_store::load_world(&output.join("good.json")).unwrap();
     assert_eq!(migrated.entities.len(), 2);
+    let mut world = World::new();
+    world.restore_world_data(&migrated).unwrap();
+    let root = world.key(migrated.entities[0].id).unwrap();
+    assert_eq!(
+        world.get::<Script>(root).unwrap().paths,
+        ["first.lua", "last.lua"]
+    );
 
     std::fs::remove_dir_all(dir).ok();
 }

@@ -226,7 +226,7 @@ fn check_and_script_runtime_use_the_same_ordered_search_roots() {
             model: "model.glb".into(),
         },
         Script {
-            path: "move.lua".into(),
+            paths: vec!["move.lua".into()],
         },
     ));
     let entity = world.entity(key).unwrap();
@@ -424,7 +424,7 @@ fn reports_bad_children_assets_and_input_as_project_problems() {
             model: "guid://aabbccdd".into(),
         },
         Script {
-            path: "Scripts/missing.lua".into(),
+            paths: vec!["Scripts/missing.lua".into()],
         },
         PrefabInstance {
             source: "Prefabs/Nested/widget.prefab.json".into(),
@@ -452,6 +452,7 @@ fn reports_bad_children_assets_and_input_as_project_problems() {
         "guid://aabbccdd",
         "Resources/missing.glb",
         "[script.missing]",
+        "paths[0] Scripts/missing.lua",
         "[prefab.source_id]",
         "[prefab.parse]",
         "[input.read]",
@@ -478,9 +479,11 @@ fn checks_each_referenced_lua_file_once_without_running_it() {
     .unwrap();
     fs::write(root.0.join(valid), "error('检查时不该运行')\n").unwrap();
     let mut scene = World::new();
-    for path in [broken, "guid://aabbccdd", valid] {
-        scene.spawn((Script { path: path.into() },));
-    }
+    scene.spawn((Script {
+        paths: [broken, "guid://aabbccdd", valid]
+            .map(str::to_owned)
+            .to_vec(),
+    },));
     save_world(&root.0.join(&manifest.entry_scene), &scene.world_data()).unwrap();
 
     let before = snapshot(&root.0);

@@ -1,39 +1,125 @@
-//! 按 `script.lua` 组件驱动脚本实体：每个实体一个 Lua 宿主，帧内产生命令后统一结算。
+//! 按 `script.lua.paths` 顺序驱动每个实体的 Lua 挂载，帧末统一结算命令。
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use xgc_asset::{AssetCatalog, AssetPaths, SearchPaths};
 use xgc_base::{EntityId, EntityKey};
-use xgc_world::{AudioCommand, AudioMixer, ListenerPose, Script, World};
+use xgc_world::{AudioCommand, AudioMixer, Command, ListenerPose, Script, World};
 
+use crate::legacy::Commands;
 use crate::view::{EntityView, ScriptView};
 use crate::LuaHost;
 
-struct Entry {
+struct MountedVm {
     host: LuaHost,
     source: PathBuf,
 }
 
-impl Entry {
-    fn error_for(&self, entity: EntityId, result: Result<bool, String>) -> Option<String> {
-        result
-            .err()
-            .map(|err| format!("{} 实体 {entity}：{err}", self.source.display()))
+struct Mount {
+    path: String,
+    vm: Option<MountedVm>,
+}
+
+impl Mount {
+    fn error(&self, entity: EntityId, err: String) -> String {
+        format!("脚本 {} 实体 {entity}：{err}", self.path)
+    }
+
+    fn dispatch(
+        &self,
+        entity: EntityId,
+        hook: impl FnOnce(&LuaHost) -> Result<bool, String>,
+        frame_error: &mut Option<String>,
+    ) {
+        if let Some(vm) = &self.vm {
+            if let Err(err) = hook(&vm.host) {
+                note_error(frame_error, self.error(entity, err));
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct EntityScripts {
+    mounts: Vec<Mount>,
+    // 同一实体的挂载共享待结算写入，后执行的 UI 调用才能读到先前挂载修改的字段。
+    commands: Commands,
+}
+
+impl EntityScripts {
+    fn reconcile(&mut self, entity: EntityId, script: &Script, error: &mut Option<String>) {
+        let paths = mounted_paths(script);
+        if self
+            .mounts
+            .iter()
+            .map(|mount| mount.path.as_str())
+            .eq(paths.clone())
+        {
+            return;
+        }
+
+        // 相同路径按出现顺序认回旧 VM。先取到的副本始终优先保留。
+        let mut previous = std::mem::take(&mut self.mounts);
+        self.mounts.extend(paths.map(|path| {
+            if let Some(index) = previous.iter().position(|mount| mount.path == path) {
+                previous.remove(index)
+            } else {
+                Mount {
+                    path: path.to_owned(),
+                    vm: None,
+                }
+            }
+        }));
+        for mount in previous {
+            mount.dispatch(entity, LuaHost::destroy, error);
+        }
+    }
+
+    fn load_missing(
+        &mut self,
+        assets: &AssetPaths,
+        view: &Rc<RefCell<ScriptView>>,
+        entity: EntityId,
+        error: &mut Option<String>,
+    ) {
+        for mount in &mut self.mounts {
+            if mount.vm.is_some() {
+                continue;
+            }
+            match load_mount(assets, view, entity, &mount.path, &self.commands) {
+                Ok(vm) => mount.vm = Some(vm),
+                Err(err) => note_error(error, mount.error(entity, err)),
+            }
+        }
+    }
+
+    fn dispatch(
+        &self,
+        entity: EntityId,
+        hook: impl Fn(&LuaHost) -> Result<bool, String>,
+        error: &mut Option<String>,
+    ) {
+        for mount in &self.mounts {
+            mount.dispatch(entity, &hook, error);
+        }
+    }
+
+    fn drain_into(&self, pending: &mut Vec<Command>) {
+        pending.append(&mut self.commands.borrow_mut());
     }
 }
 
 pub struct ScriptRuntime {
     assets: AssetPaths,
-    entries: HashMap<EntityId, Entry>,
-    started: HashSet<EntityId>,
+    entries: BTreeMap<EntityId, EntityScripts>,
     view: Rc<RefCell<ScriptView>>,
     entity_keys: Vec<(EntityId, EntityKey)>,
+    script_keys: Vec<(EntityId, EntityKey)>,
     time: f32,
-    /// 本帧第一处脚本错误。只打 stderr 不够：宿主（`run-scripts` / `trace`）要看得到
-    /// 失败并退出 2，否则坏脚本会静默退化成"什么都没发生"。
+    /// 本帧第一处脚本错误。宿主（`run-scripts` / `trace`）据此标记帧失败。
     frame_error: Option<String>,
 }
 
@@ -49,10 +135,10 @@ impl ScriptRuntime {
     pub fn with_assets(assets: AssetPaths) -> Self {
         Self {
             assets,
-            entries: HashMap::new(),
-            started: HashSet::new(),
+            entries: BTreeMap::new(),
             view: Rc::new(RefCell::new(ScriptView::default())),
             entity_keys: Vec::new(),
+            script_keys: Vec::new(),
             time: 0.0,
             frame_error: None,
         }
@@ -66,95 +152,76 @@ impl ScriptRuntime {
         self.frame_error = None;
         self.time += dt;
         self.refresh_view(world, dt);
-        let mut scripts = Vec::new();
+        self.script_keys.clear();
         world.for_each::<Script>(|key, script| {
-            if let Some(entity) = world.entity(key) {
-                scripts.push((entity, script.path.clone()));
+            if mounted_paths(script).next().is_some() {
+                if let Some(entity) = world.entity(key) {
+                    self.script_keys.push((entity, key));
+                }
             }
         });
-        scripts.sort_by_key(|(entity, _)| *entity);
-        let live: HashSet<EntityId> = scripts.iter().map(|(entity, _)| *entity).collect();
-        let mut stale: Vec<EntityId> = self
-            .entries
-            .keys()
-            .filter(|entity| !live.contains(entity))
-            .copied()
-            .collect();
-        stale.sort_unstable();
-        for entity in stale {
-            if let Some(entry) = self.entries.remove(&entity) {
-                if let Some(err) = entry.error_for(entity, entry.host.destroy()) {
-                    self.note_error(&err);
-                }
-            }
-            self.started.remove(&entity);
-        }
+        self.script_keys.sort_unstable_by_key(|&(id, _)| id);
+
         let mut pending = Vec::new();
-        for (entity, path) in scripts {
-            if !self.entries.contains_key(&entity) {
-                match self.load_entity(entity, &path) {
-                    Ok(entry) => {
-                        self.entries.insert(entity, entry);
-                    }
-                    Err(err) => {
-                        self.note_error(&err);
-                        continue;
-                    }
-                }
+        let error = &mut self.frame_error;
+        self.entries.retain(|&entity, scripts| {
+            if self
+                .script_keys
+                .binary_search_by_key(&entity, |&(id, _)| id)
+                .is_ok()
+            {
+                return true;
             }
-            let started = self.started.insert(entity);
-            let entry = self.entries.get(&entity).expect("刚插入");
-            let start_error = if started {
-                entry.error_for(entity, entry.host.start_legacy())
-            } else {
-                None
-            };
-            let update_error = entry.error_for(entity, entry.host.update_legacy(dt));
-            let fixed_error = entry.error_for(entity, entry.host.fixed_legacy());
-            pending.extend(entry.host.take_commands());
-            if let Some(err) = start_error {
-                self.note_error(&err);
+            // 热重载后尚未结算的旧命令与挂载一起失效；现在只收销毁钩子的写入。
+            scripts.commands.borrow_mut().clear();
+            scripts.dispatch(entity, LuaHost::destroy, error);
+            if world.key(entity).is_none() {
+                // 旧端已删除实体的自身 setter 是空操作，不能因此连带拒绝对其他实体的写入。
+                scripts
+                    .commands
+                    .borrow_mut()
+                    .retain(|command| match command {
+                        Command::SetField { entity: target, .. }
+                        | Command::AddComponent { entity: target, .. }
+                        | Command::RemoveComponent { entity: target, .. }
+                        | Command::Despawn { entity: target } => *target != entity,
+                        Command::Replace { data } => data.id != entity,
+                        Command::Spawn { .. } => true,
+                    });
             }
-            if let Some(err) = update_error {
-                self.note_error(&err);
-            }
-            if let Some(err) = fixed_error {
-                self.note_error(&err);
+            scripts.drain_into(&mut pending);
+            false
+        });
+        for &(entity, key) in &self.script_keys {
+            let script = world.get::<Script>(key).expect("脚本组件在派发期间只读");
+            let scripts = self.entries.entry(entity).or_default();
+            scripts.reconcile(entity, script, error);
+            scripts.load_missing(&self.assets, &self.view, entity, error);
+            // 保留 XGC 按实体派发的阶段；同一实体在每个阶段按挂载顺序调用。
+            scripts.dispatch(entity, LuaHost::start_legacy, error);
+            scripts.dispatch(entity, |host| host.update_legacy(dt), error);
+            scripts.dispatch(entity, LuaHost::fixed_legacy, error);
+            scripts.drain_into(&mut pending);
+        }
+        // 先派发本步物理碰撞，再派发上一步 Animator 排入的动画事件；事件写入同批结算。
+        for event in world.collision_events() {
+            if let Some(scripts) = self.entries.get(&event.entity) {
+                scripts.dispatch(
+                    event.entity,
+                    |host| host.collision_legacy(event.enter, event.other),
+                    error,
+                );
+                scripts.drain_into(&mut pending);
             }
         }
-        // 碰撞事件由物理系统在本步写入；宿主阶段在所有系统之后，所以这里看到的就是本步
-        // 的接触。先于命令结算派发：钩子写的命令与 update / fixed_update 写的命令同批结算。
-        let collisions: Vec<_> = world
-            .collision_events()
-            .iter()
-            .map(|event| (event.entity, event.other, event.enter))
-            .collect();
-        for (entity, other, enter) in collisions {
-            let error = self.entries.get(&entity).and_then(|entry| {
-                let error = entry.error_for(entity, entry.host.collision_legacy(enter, other));
-                pending.extend(entry.host.take_commands());
-                error
-            });
-            if let Some(err) = error {
-                self.note_error(&err);
-            }
-        }
-        // 动画事件由 `AnimatorSystem` 在上一步末尾写入（动画在宿主之后）；宿主
-        // 在这里消费，所以脚本看到的是一步之前跨过的事件——CLI / 编辑器 Play
-        // 的固定步是 60 Hz，差一帧不影响"按事件名做反应"的语义。
-        let anim_events: Vec<_> = world
-            .animation_events()
-            .iter()
-            .map(|event| (event.entity, event.name.clone()))
-            .collect();
-        for (entity, name) in anim_events {
-            let error = self.entries.get(&entity).and_then(|entry| {
-                let error = entry.error_for(entity, entry.host.anim_event_legacy(&name));
-                pending.extend(entry.host.take_commands());
-                error
-            });
-            if let Some(err) = error {
-                self.note_error(&err);
+        for event in world.animation_events() {
+            if let Some(scripts) = self.entries.get(&event.entity) {
+                scripts.dispatch(
+                    event.entity,
+                    |host| host.anim_event_legacy(&event.name),
+                    error,
+                );
+                scripts.drain_into(&mut pending);
             }
         }
         self.discard_action_edges();
@@ -164,10 +231,16 @@ impl ScriptRuntime {
         let plan = world.plan(pending);
         if plan.is_valid() {
             if let Err(diagnostics) = world.apply(&plan) {
-                self.note_error(&format!("命令应用失败：{diagnostics:?}"));
+                note_error(
+                    &mut self.frame_error,
+                    format!("命令应用失败：{diagnostics:?}"),
+                );
             }
         } else {
-            self.note_error(&format!("命令计划无效：{:?}", plan.diagnostics));
+            note_error(
+                &mut self.frame_error,
+                format!("命令计划无效：{:?}", plan.diagnostics),
+            );
         }
     }
 
@@ -189,32 +262,6 @@ impl ScriptRuntime {
             audio.listener,
             audio.commands.drain(..),
         );
-    }
-
-    fn note_error(&mut self, err: &str) {
-        eprintln!("script: {err}");
-        if self.frame_error.is_none() {
-            self.frame_error = Some(err.to_string());
-        }
-    }
-
-    fn load_entity(&self, entity: EntityId, path: &str) -> Result<Entry, String> {
-        let resolved = self
-            .assets
-            .resolve(path)
-            .map_err(|err| format!("读取脚本 {path} 失败：{err}"))?;
-        let source = std::fs::read_to_string(&resolved)
-            .map_err(|err| format!("读取 {} 失败：{err}", resolved.display()))?;
-        let host = LuaHost::with_commands_and_view(
-            Rc::new(RefCell::new(Vec::new())),
-            Rc::clone(&self.view),
-            entity.raw(),
-        )?;
-        host.load_script(path, &source)?;
-        Ok(Entry {
-            host,
-            source: resolved,
-        })
     }
 
     fn refresh_view(&mut self, world: &World, dt: f32) {
@@ -241,21 +288,36 @@ impl ScriptRuntime {
 
     /// 重新读取磁盘并执行所有已加载脚本；场景脚本热重载入口。
     pub fn reload_all(&mut self) -> Result<(), String> {
-        let mut entities: Vec<_> = self.entries.keys().copied().collect();
-        entities.sort_unstable();
-        for entity in entities {
-            let entry = &self.entries[&entity];
-            let source = std::fs::read_to_string(&entry.source)
-                .map_err(|err| format!("读取 {} 失败：{err}", entry.source.display()))?;
-            entry
-                .host
-                .load_script(&entry.source.to_string_lossy(), &source)?;
+        for (&entity, scripts) in &self.entries {
+            for mount in &scripts.mounts {
+                let Some(vm) = &mount.vm else {
+                    continue;
+                };
+                let source = std::fs::read_to_string(&vm.source).map_err(|err| {
+                    mount.error(entity, format!("读取 {} 失败：{err}", vm.source.display()))
+                })?;
+                vm.host
+                    .load_script(&mount.path, &source)
+                    .map_err(|err| mount.error(entity, err))?;
+            }
         }
         Ok(())
     }
 
     pub fn entity_count(&self) -> usize {
-        self.entries.len()
+        self.entries
+            .values()
+            .filter(|scripts| scripts.mounts.iter().any(|mount| mount.vm.is_some()))
+            .count()
+    }
+
+    /// 已成功加载的挂载数，同一实体的多个 VM 分开计数。
+    pub fn script_count(&self) -> usize {
+        self.entries
+            .values()
+            .flat_map(|scripts| &scripts.mounts)
+            .filter(|mount| mount.vm.is_some())
+            .count()
     }
 
     /// 无设备边沿的调用方只需提交当前按住状态，转换会在下一帧消费。
@@ -300,4 +362,40 @@ impl ScriptRuntime {
     pub fn clear_axes(&mut self) {
         self.view.borrow_mut().axes.clear();
     }
+}
+
+fn mounted_paths(script: &Script) -> impl Iterator<Item = &str> + Clone {
+    script
+        .paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !path.is_empty())
+}
+
+fn load_mount(
+    assets: &AssetPaths,
+    view: &Rc<RefCell<ScriptView>>,
+    entity: EntityId,
+    path: &str,
+    commands: &Commands,
+) -> Result<MountedVm, String> {
+    let resolved = assets.resolve(path).map_err(|err| err.to_string())?;
+    let source = std::fs::read_to_string(&resolved)
+        .map_err(|err| format!("读取 {} 失败：{err}", resolved.display()))?;
+    let host = LuaHost::with_commands_and_view(Rc::clone(commands), Rc::clone(view), entity.raw())?;
+    // 顶层代码可能改已有的 UI 写入。加载失败仍须保留其他挂载已经排队的命令。
+    let previous = commands.borrow().clone();
+    if let Err(err) = host.load_script(path, &source) {
+        *commands.borrow_mut() = previous;
+        return Err(err);
+    }
+    Ok(MountedVm {
+        host,
+        source: resolved,
+    })
+}
+
+fn note_error(frame_error: &mut Option<String>, err: String) {
+    eprintln!("script: {err}");
+    frame_error.get_or_insert(err);
 }

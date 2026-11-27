@@ -27,7 +27,7 @@ fn set_anim_additive_weight_writes_the_animator_component() {
             ..Animator::default()
         },
         Script {
-            path: "additive.lua".to_string(),
+            paths: vec!["additive.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);

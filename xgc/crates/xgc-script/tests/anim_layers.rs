@@ -38,7 +38,7 @@ fn run_script(body: &str) -> Vec<AnimLayer> {
             ],
         },
         Script {
-            path: "layers.lua".into(),
+            paths: vec!["layers.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);

@@ -396,7 +396,7 @@ mod tests {
                 },
                 GlobalTransform::default(),
                 Script {
-                    path: "update.lua".to_string(),
+                    paths: vec!["update.lua".into()],
                 },
             ));
             let root_id = world.entity(root).unwrap();

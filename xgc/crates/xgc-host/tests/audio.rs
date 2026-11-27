@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use xgc_host::{asset_paths, ScriptedRunner, AUDIO_SAMPLE_RATE};
 use xgc_sim::{load_wav, write_wav_mono};
 use xgc_world::{
-    AudioMixer, AudioSource, Command, Component, ComponentData, GlobalTransform, Name, Parent,
-    Script, Transform, Value, World,
+    AudioMixer, AudioSource, Command, ComponentData, GlobalTransform, Name, Parent, Script,
+    Transform, World,
 };
 
 #[test]
@@ -56,7 +56,7 @@ fn lua_sound_commands_use_search_paths_and_mix_in_frame_order() {
     let mut world = World::new();
     world.spawn((
         Script {
-            path: "audio.lua".into(),
+            paths: vec!["audio.lua".into()],
         },
         AudioMixer {
             bgm: 0.75,
@@ -150,10 +150,9 @@ fn autoplay_follows_the_entity_and_stops_when_the_source_is_removed() {
     ));
     let plan = world.plan(vec![Command::AddComponent {
         entity: world.entity(source).unwrap(),
-        component: ComponentData {
-            component: Script::ID,
-            fields: vec![("path".into(), Value::String("source.lua".into()))],
-        },
+        component: ComponentData::from_component(&Script {
+            paths: vec!["source.lua".into()],
+        }),
     }]);
     world.apply(&plan).unwrap();
     let (mut runner, _) = ScriptedRunner::with_assets(world, asset_paths(Some(&root), &[]));

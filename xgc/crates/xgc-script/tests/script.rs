@@ -198,7 +198,7 @@ fn runtime_drives_script_entities_and_reloads() {
     let entity = world.spawn((
         Transform::default(),
         Script {
-            path: "move.lua".to_string(),
+            paths: vec!["move.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);
@@ -263,7 +263,7 @@ fn animation_parameter_writes_accumulate_and_skip_missing_components() {
     world.spawn((
         Transform::default(),
         Script {
-            path: "anim.lua".to_string(),
+            paths: vec!["anim.lua".into()],
         },
     ));
     let animated = world.spawn((
@@ -276,13 +276,13 @@ fn animation_parameter_writes_accumulate_and_skip_missing_components() {
             ..AnimationState::default()
         },
         Script {
-            path: "anim.lua".to_string(),
+            paths: vec!["anim.lua".into()],
         },
     ));
     let mover = world.spawn((
         Transform::default(),
         Script {
-            path: "move.lua".to_string(),
+            paths: vec!["move.lua".into()],
         },
     ));
     world.push_animation_event(FiredAnimEvent {
@@ -347,7 +347,7 @@ fn runtime_destroys_scripts_when_entity_is_removed() {
     let entity = world.spawn((
         Transform::default(),
         Script {
-            path: "idle.lua".to_string(),
+            paths: vec!["idle.lua".into()],
         },
     ));
     let id = world.entity(entity).unwrap();
@@ -384,7 +384,7 @@ fn runtime_adds_and_removes_components_via_commands() {
     let entity = world.spawn((
         Transform::default(),
         Script {
-            path: "components.lua".to_string(),
+            paths: vec!["components.lua".into()],
         },
     ));
     let id = world.entity(entity).unwrap();
@@ -426,7 +426,7 @@ fn legacy_update_rotates_with_delta() {
     let key = world.spawn((
         Transform::default(),
         Script {
-            path: "spin.lua".to_string(),
+            paths: vec!["spin.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);
@@ -469,7 +469,7 @@ fn legacy_entity_lookup_and_set_pos() {
     let mover = world.spawn((
         Transform::default(),
         Script {
-            path: "follow.lua".to_string(),
+            paths: vec!["follow.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);
@@ -507,7 +507,7 @@ fn legacy_ui_api_writes_element_fields() {
             ..Default::default()
         },
         Script {
-            path: "hud.lua".to_string(),
+            paths: vec!["hud.lua".into()],
         },
     ));
     let id = world.entity(entity).unwrap();
@@ -543,7 +543,7 @@ fn legacy_ui_color_arguments_are_srgb() {
     let entity = world.spawn((
         UiElement::default(),
         Script {
-            path: "color.lua".to_string(),
+            paths: vec!["color.lua".into()],
         },
     ));
     let id = world.entity(entity).unwrap();
@@ -583,7 +583,7 @@ fn legacy_input_action_sets_velocity() {
         Transform::default(),
         Velocity::default(),
         Script {
-            path: "jump.lua".to_string(),
+            paths: vec!["jump.lua".into()],
         },
     ));
     let mut runtime = xgc_script::ScriptRuntime::new(&dir);

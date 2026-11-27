@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use xgc_base::EntityId;
-use xgc_world::{remap_parent, PrefabInstance, WorldData};
+use xgc_world::{remap_parent, ComponentData, PrefabInstance, WorldData};
 
 use super::files::{copy_file, path_key};
 use super::{normalize, ProjectMigrationError};
@@ -38,15 +38,13 @@ impl WorldPlan {
         };
         let text = fs::read_to_string(root.join(source)).map_err(|err| error(err.to_string()))?;
         let scene: OldScene = ron::from_str(&text).map_err(|err| error(err.to_string()))?;
-        let (world, report) =
-            crate::migrate_parsed(&scene).map_err(|err| error(err.to_string()))?;
+        let (world, _) = crate::migrate_parsed(&scene).map_err(|err| error(err.to_string()))?;
         let ids = world
             .entities
             .iter()
             .map(|entity| (entity.id, entity.id))
             .collect();
-        let mut unmatched = unmatched_fields(source, &scene);
-        unmatched.extend(report.unmatched(source));
+        let unmatched = unmatched_fields(source, &scene);
         let references = scene
             .entities
             .into_iter()
@@ -241,14 +239,14 @@ impl PrefabPlans {
                             prefab.document.source, reference.source_id.0
                         ),
                     })?;
-                scene.world.entities[*index].components.push(
-                    PrefabInstance {
-                        source: prefab.identity.clone(),
-                        source_id: source_id.raw(),
-                        root: reference.is_root,
-                    }
-                    .into_data(),
-                );
+                let instance = PrefabInstance {
+                    source: prefab.identity.clone(),
+                    source_id: source_id.raw(),
+                    root: reference.is_root,
+                };
+                scene.world.entities[*index]
+                    .components
+                    .push(ComponentData::from_component(&instance));
             }
         }
         Ok(())

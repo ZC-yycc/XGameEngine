@@ -43,12 +43,14 @@ impl LuaHost {
         self.call_hook("on_update", dt)
     }
 
-    /// 旧生命周期：`fixed_update(ctx)`，每个物理固定步调用一次。
-    ///
-    /// 与 `update` 分开是因为两个回调的频率语义不同：`update` 对应渲染帧，
-    /// `fixed_update` 对应固定步长。脚本只定义其中一个时另一个保持 no-op。
+    /// `fixed_update(ctx)` 在 `update` 阶段之后派发。XGC 宿主在每个固定步依次运行两者。
     pub fn fixed_legacy(&self) -> Result<bool, String> {
         self.call_legacy("fixed_update", |ctx| ctx)
+    }
+
+    /// 销毁时世界里可能已经没有对应实体，钩子仍可读取原 VM 的自身 ID 和状态。
+    pub fn destroy(&self) -> Result<bool, String> {
+        self.call_legacy("on_destroy", |ctx| ctx)
     }
 
     /// 旧生命周期：`on_collision_enter(ctx, other)` / `on_collision_exit(ctx, other)`。

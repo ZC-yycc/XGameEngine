@@ -120,7 +120,7 @@ impl ScriptedRunner {
     }
 
     pub fn script_count(&self) -> usize {
-        self.runtime.entity_count()
+        self.runtime.script_count()
     }
 
     /// 无窗口输入可在零个或多个固定步之间提交状态快照。

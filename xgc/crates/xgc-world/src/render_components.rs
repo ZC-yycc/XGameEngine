@@ -54,8 +54,7 @@ impl Component for MeshRenderer {
 /// 内建：材质参数 = 共享材质资产引用（可空）+ 逐实体覆盖。
 ///
 /// 渲染侧的叠加顺序与旧引擎一致：`模型材质 → .mat 资产 → 本组件覆盖`，
-/// 基色都是乘子。`asset` 为空串表示"不引用资产"，与 `render.mesh.model`、
-/// `script.lua.path` 用空串表示"没配"是同一套约定。
+/// 基色都是乘子。`asset` 为空串表示不引用资产，与 `render.mesh.model` 的约定相同。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
     pub base_color: [f32; 4],

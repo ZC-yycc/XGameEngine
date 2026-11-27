@@ -24,7 +24,9 @@ pub fn instantiate_prefab(
             remap_parent(&mut data, &mapping);
             if let Some(source) = source {
                 data.components
-                    .push(instance_data(entity, source).into_data());
+                    .push(ComponentData::from_component(&instance_data(
+                        entity, source,
+                    )));
             }
             Command::Spawn { data }
         })
@@ -81,7 +83,10 @@ pub fn revert_prefab(
         data.components
             .retain(|component| component.component != PrefabInstance::ID);
         data.components
-            .push(instance_data(entity, &instance.source).into_data());
+            .push(ComponentData::from_component(&instance_data(
+                entity,
+                &instance.source,
+            )));
         if entity.id == retained_root.id {
             // 同一个外部父节点下保留局部 TRS，即可精确保留摆放，无需分解世界矩阵。
             data.components
@@ -201,7 +206,8 @@ fn apply_components(
             .ok_or_else(&structure_changed)?;
         let same_key = match component.component {
             Script::ID => {
-                read_component::<Script>(component)?.path == read_component::<Script>(&value)?.path
+                read_component::<Script>(component)?.paths
+                    == read_component::<Script>(&value)?.paths
             }
             PluginComponent::ID => {
                 read_component::<PluginComponent>(component)?.registered_name

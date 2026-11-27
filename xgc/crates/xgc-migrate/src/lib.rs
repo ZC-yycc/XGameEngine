@@ -194,7 +194,6 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
 
     let mut report = MigrationReport::default();
     let mut entities = Vec::with_capacity(scene.entities.len());
-    let mut script_paths = Vec::new();
     let mut max_id = 0;
 
     for old in &scene.entities {
@@ -207,7 +206,7 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
         let mut mesh_model = None;
         let mut material = None;
         let mut camera = None;
-        script_paths.clear();
+        let mut script_paths = Vec::new();
         let mut audio = None;
         let mut physics = None;
         let mut animator = None;
@@ -251,7 +250,15 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
                     camera = Some(old_camera);
                     report.mapped_components += 1;
                 }
-                OldComponentData::Lua { path } => script_paths.push(path.as_str()),
+                OldComponentData::Lua { path } => {
+                    if script_paths.contains(path) {
+                        return Err(MigrationError::Parse(format!(
+                            "实体 {} 的 Lua 脚本重复挂载：{path:?}",
+                            old.id.0
+                        )));
+                    }
+                    script_paths.push(path.clone());
+                }
                 OldComponentData::Audio(old_audio) => {
                     audio = Some(AudioSource {
                         clip: old_audio.clip.clone(),
@@ -471,11 +478,11 @@ fn migrate_parsed(scene: &OldScene) -> Result<(WorldData, MigrationReport), Migr
         if let Some(lod) = lod {
             components.push(lod);
         }
-        if let Some(path) = report.map_lua(old.id.0, &script_paths) {
-            components.push(ComponentData {
-                component: Script::ID,
-                fields: vec![("path".to_string(), Value::String(path.to_string()))],
-            });
+        if !script_paths.is_empty() {
+            components.push(ComponentData::from_component(&Script {
+                paths: script_paths,
+            }));
+            report.mapped_components += 1;
         }
         if let Some(audio) = audio {
             components.push(ComponentData {

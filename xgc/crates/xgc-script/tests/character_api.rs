@@ -30,7 +30,7 @@ fn fixed_update_runs_once_per_step_with_a_context() {
     let entity = world.spawn((
         Transform::default(),
         Script {
-            path: "counter.lua".to_string(),
+            paths: vec!["counter.lua".into()],
         },
     ));
     let mut runtime = ScriptRuntime::new(&dir);
@@ -59,7 +59,7 @@ fn character_api_drives_velocity_and_jump() {
             ..Default::default()
         },
         Script {
-            path: "player.lua".to_string(),
+            paths: vec!["player.lua".into()],
         },
     ));
     let mut runtime = ScriptRuntime::new(&dir);
@@ -89,7 +89,7 @@ fn state_survives_between_frames_and_axis_defaults_to_zero() {
     let entity = world.spawn((
         Transform::default(),
         Script {
-            path: "state.lua".to_string(),
+            paths: vec!["state.lua".into()],
         },
     ));
     let mut runtime = ScriptRuntime::new(&dir);

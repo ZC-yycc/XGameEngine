@@ -294,7 +294,7 @@ mod tests {
         let key = world.spawn((
             Transform::default(),
             Script {
-                path: "move.lua".into(),
+                paths: vec!["move.lua".into()],
             },
         ));
         let id = world.entity(key).unwrap();

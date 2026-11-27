@@ -12,8 +12,8 @@ use xgc_world::{
 use crate::{write_atomic, Result, StoreError};
 
 const MAGIC: &[u8; 4] = b"XGCB";
-/// 6：动画混合层改为结构化列表。
-const VERSION: u32 = 6;
+/// 7：Lua 挂载以有序列表保存。
+const VERSION: u32 = 7;
 const MAP_TAG: u8 = 11;
 const ENUM_TAG: u8 = 12;
 // 读写共用限制，防止深层反射值耗尽线程栈。

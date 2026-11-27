@@ -1,7 +1,7 @@
-use super::{scene, standard_project, write};
-use xgc_migrate::{migrate_old_project, migrate_str};
+use super::{scene, staging_of, standard_project, write, write_meta};
+use xgc_migrate::migrate_old_project;
 use xgc_store::{load_prefab, load_world};
-use xgc_world::{Component, Script, Value, WorldData};
+use xgc_world::{Component, Script, World, WorldData};
 
 fn scripted_entity(id: u64, paths: &[&str]) -> String {
     let entries = paths
@@ -15,70 +15,68 @@ fn scripted_entity(id: u64, paths: &[&str]) -> String {
     )
 }
 
-fn assert_script(data: &WorldData, retained: &str) {
-    let scripts: Vec<_> = data.entities[0]
-        .components
-        .iter()
-        .filter(|component| component.component == Script::ID)
-        .collect();
-    assert_eq!(scripts.len(), 1);
+fn assert_scripts(data: &WorldData, expected: &[&str]) {
+    let entity = &data.entities[0];
     assert_eq!(
-        scripts[0].fields,
-        [("path".to_string(), Value::String(retained.to_string()))]
+        entity
+            .components
+            .iter()
+            .filter(|component| component.component == Script::ID)
+            .count(),
+        1
     );
+    let mut world = World::new();
+    world.restore_world_data(data).unwrap();
+    let key = world.key(entity.id).unwrap();
+    assert_eq!(world.get::<Script>(key).unwrap().paths, expected);
 }
 
 #[test]
-fn reports_unattached_lua_scripts_in_scenes_and_prefabs() {
+fn preserves_all_lua_attachments_in_scenes_and_prefabs() {
     let (root, out) = standard_project("lua-attachments");
-    let paths = ["Scripts/a.lua", "Scripts/b.lua", "Scripts/main.lua"];
-    let source = scene(&scripted_entity(41, &paths));
-    let prefab = scene(&scripted_entity(71, &paths[1..]));
+    let scene_paths = [r".\Scripts\a.lua", "guid://abcd1234", "Scripts/main.lua"];
+    let prefab_paths = ["Scripts/main.lua", "guid://abcd1234"];
+    let source = scene(&scripted_entity(41, &scene_paths));
+    let prefab = scene(&scripted_entity(71, &prefab_paths));
     write(&root, "Scenes/a.ron", &source);
     write(&root, "Prefabs/P.prefab.ron", &prefab);
-    for path in &paths[..2] {
-        write(&root, path, "function start(ctx) end\n");
-    }
+    write(&root, "Scripts/a.lua", "function start(ctx) end\r\n");
+    write(&root, "Scripts/b.lua", "-- GUID 指向此脚本\n");
+    write_meta(&root, "Scripts/b.lua", "abcd1234");
 
     let dry = migrate_old_project(&root, &out, true).unwrap();
     assert!(!out.exists());
-    assert_eq!(dry.unmatched.len(), 2, "{}", dry.render());
-    let scene_note = dry
-        .unmatched
-        .iter()
-        .find(|note| note.contains("[migration.lua.attachment] Scenes/a.ron 实体 41"))
-        .expect("应点名旧场景和实体");
-    assert!(scene_note.contains("保留 \"Scripts/main.lua\""));
-    assert!(scene_note.contains("未挂载 [\"Scripts/a.lua\", \"Scripts/b.lua\"]"));
-    assert!(dry.unmatched.iter().any(|note| note
-        .contains("[migration.lua.attachment] Prefabs/P.prefab.ron 实体 71")
-        && note.contains("未挂载 [\"Scripts/b.lua\"]")));
-    assert_eq!(dry.asset_references, 2);
-
-    let (world, single) = migrate_str(&source).unwrap();
-    assert_eq!(single.mapped_components, 1);
-    assert_eq!(
-        single.unmatched("Scenes/a.ron").collect::<Vec<_>>(),
-        std::slice::from_ref(scene_note)
-    );
-    assert_script(&world, paths[2]);
+    assert!(!staging_of(&out).exists());
+    assert!(dry.unmatched.is_empty(), "{}", dry.render());
+    assert_eq!(dry.asset_references, 5);
 
     let live = migrate_old_project(&root, &out, false).unwrap();
     assert_eq!(live.unmatched, dry.unmatched);
-    assert_script(&load_world(&out.join("scenes/a.json")).unwrap(), paths[2]);
-    assert_script(
+    assert_eq!(live.copied_files, dry.copied_files);
+    assert_eq!(live.components, dry.components);
+    assert_eq!(live.asset_references, dry.asset_references);
+    assert_scripts(
+        &load_world(&out.join("scenes/a.json")).unwrap(),
+        &scene_paths,
+    );
+    assert_scripts(
         &load_prefab(&out.join("prefabs/P.prefab.json")).unwrap(),
-        paths[2],
+        &prefab_paths,
     );
     assert_eq!(
-        std::fs::read_to_string(root.join("Scenes/a.ron")).unwrap(),
-        source
+        std::fs::read(root.join("Scenes/a.ron")).unwrap(),
+        source.as_bytes()
     );
     assert_eq!(
-        std::fs::read_to_string(root.join("Prefabs/P.prefab.ron")).unwrap(),
-        prefab,
+        std::fs::read(root.join("Prefabs/P.prefab.ron")).unwrap(),
+        prefab.as_bytes(),
     );
-    for path in paths {
+    for path in [
+        "Scripts/a.lua",
+        "Scripts/b.lua",
+        "Scripts/b.lua.meta",
+        "Scripts/main.lua",
+    ] {
         assert_eq!(
             std::fs::read(root.join(path)).unwrap(),
             std::fs::read(out.join(path)).unwrap(),

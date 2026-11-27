@@ -31,7 +31,7 @@ fn scripted_world(label: &str) -> (PathBuf, PathBuf) {
     world.spawn((
         Transform::default(),
         Script {
-            path: "move.lua".to_string(),
+            paths: vec!["move.lua".into()],
         },
     ));
     save_world(&path, &world.world_data()).unwrap();
