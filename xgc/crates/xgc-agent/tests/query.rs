@@ -4,7 +4,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use serde_json::{json, Value as Json};
-use xgc_agent::Agent;
+use xgc_agent::{Agent, Mcp};
 use xgc_base::EntityId;
 use xgc_reflect::Component;
 use xgc_world::{
@@ -129,6 +129,68 @@ fn cursor_keeps_filtered_offsets_and_exact_id_order() {
 }
 
 #[test]
+fn columns_keep_projection_order_missing_values_and_exact_ids_over_mcp() {
+    let mut agent = Agent::new();
+    let parent = 9007199254740993;
+    let mut child = entity(2, 1.0);
+    child.components.push(component(
+        xgc_world::Parent::ID,
+        &[("entity", Value::Entity(parent))],
+    ));
+    let data = restore(&mut agent, vec![entity(parent, 2.0), child]);
+    let mut mcp = Mcp::new();
+    let reply = mcp
+        .handle_line(&mcp_request("world_restore", json!({"data": data})))
+        .unwrap();
+    mcp_text(&serde_json::from_str(&reply).unwrap());
+
+    let mut params = json!({
+        "format": "columns",
+        "select": ["core.parent:entity", "core.transform:position", "core.name:value"],
+        "limit": 1,
+    });
+    let first = result(&mut agent, "world.query", params.clone());
+    assert_eq!(
+        first["columns"],
+        json!([
+            {"name": "id", "type": "entity"},
+            {"name": "core.parent:entity", "type": "entity"},
+            {"name": "core.transform:position", "type": "vec3"},
+            {"name": "core.name:value", "type": "string"},
+        ])
+    );
+    assert_eq!(
+        first["rows"],
+        json!([["2", parent.to_string(), [1.0, 0.0, 0.0], "Entity 2"]])
+    );
+    assert_eq!(first["next_offset"], 1);
+
+    let reply = mcp
+        .handle_line(&mcp_request("world_query", params.clone()))
+        .unwrap();
+    let response: Json = serde_json::from_str(&reply).unwrap();
+    let text = mcp_text(&response);
+    let decoded: Json = serde_json::from_str(text).unwrap();
+    assert_eq!(text, decoded.to_string());
+    assert_eq!(decoded["columns"], first["columns"]);
+    assert_eq!(decoded["rows"], first["rows"]);
+
+    params["cursor"] = first["next_cursor"].clone();
+    let next = result(&mut agent, "world.query", params);
+    assert_eq!(next["columns"], first["columns"]);
+    assert_eq!(
+        next["rows"],
+        json!([[
+            parent.to_string(),
+            null,
+            [2.0, 0.0, 0.0],
+            format!("Entity {parent}")
+        ]])
+    );
+    assert!(next["next_cursor"].is_null());
+}
+
+#[test]
 fn cursor_rejects_mutations_replacements_and_foreign_sessions() {
     let mut agent = Agent::new();
     let data = restore(&mut agent, vec![entity(2, 1.0), entity(4, 2.0)]);
@@ -209,19 +271,46 @@ fn zero_limit_retains_offset_without_advancing_cursor() {
     assert_eq!(page["next_offset"], Json::Null);
 }
 
+const WARMUP: usize = 4;
+const SAMPLES: usize = 40;
+
+fn mcp_request(tool: &str, arguments: Json) -> String {
+    request("tools/call", json!({"name": tool, "arguments": arguments}))
+}
+
+fn mcp_text(response: &Json) -> &str {
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    response["result"]["content"][0]["text"].as_str().unwrap()
+}
+
+fn latencies(mut times: [u128; SAMPLES]) -> String {
+    times.sort_unstable();
+    format!(
+        "p50_us={} p95_us={} p99_us={}",
+        times[SAMPLES / 2],
+        times[SAMPLES * 95 / 100 - 1],
+        times[SAMPLES * 99 / 100]
+    )
+}
+
+fn time_query(mut handle: impl FnMut() -> String) -> (String, [u128; SAMPLES]) {
+    let first = handle();
+    for _ in 0..WARMUP {
+        black_box(handle());
+    }
+    let mut times = [0; SAMPLES];
+    for time in &mut times {
+        let start = Instant::now();
+        let response = black_box(handle());
+        *time = start.elapsed().as_micros();
+        assert_eq!(response.len(), first.len());
+    }
+    (first, times)
+}
+
 #[test]
 #[ignore = "用 release 同机对照查询延迟和响应大小"]
 fn projected_query_budget() {
-    let mut agent = Agent::new();
-    let request = request(
-        "world.query",
-        json!({
-            "component": "core.transform",
-            "filter": {"path": "core.transform:position", "axis": "x", "op": "gt", "value": 0},
-            "select": ["core.transform:position", "core.transform:scale", "core.name:value", "core.velocity:linear"],
-            "limit": 200,
-        }),
-    );
     for count in [1_000_u64, 12_000] {
         let entities = (1..=count)
             .rev()
@@ -237,27 +326,104 @@ fn projected_query_budget() {
                 entity
             })
             .collect();
-        restore(&mut agent, entities);
-        let warmup = agent.handle_line(&request).unwrap();
-        let decoded: Json = serde_json::from_str(&warmup).unwrap();
-        assert_eq!(decoded["result"]["total"], count / 2);
-        assert_eq!(decoded["result"]["rows"].as_array().unwrap().len(), 200);
-        for _ in 0..4 {
-            black_box(agent.handle_line(&request).unwrap());
+        let mut agent = Agent::new();
+        let mut mcp = Mcp::new();
+        let data = restore(&mut agent, entities);
+        let restored = mcp
+            .handle_line(&mcp_request("world_restore", json!({"data": data})))
+            .unwrap();
+        mcp_text(&serde_json::from_str(&restored).unwrap());
+        for limit in [200, 1_000].into_iter().filter(|limit| *limit <= count / 2) {
+            let params = json!({
+                "component": "core.transform",
+                "filter": {"path": "core.transform:position", "axis": "x", "op": "gt", "value": 0},
+                "select": ["core.transform:position", "core.transform:scale", "core.name:value", "core.velocity:linear"],
+                "limit": limit,
+            });
+            for format in ["rows", "columns"] {
+                let mut params = params.clone();
+                params["format"] = json!(format);
+                let rpc = request("world.query", params.clone());
+                let mcp_call = mcp_request("world_query", params);
+                let (rpc_response, rpc_times) = time_query(|| agent.handle_line(&rpc).unwrap());
+                let (mcp_response, mcp_times) = time_query(|| mcp.handle_line(&mcp_call).unwrap());
+                let rpc_json: Json = serde_json::from_str(&rpc_response).unwrap();
+                let mcp_json: Json = serde_json::from_str(&mcp_response).unwrap();
+                let text = mcp_text(&mcp_json);
+                let decoded: Json = serde_json::from_str(text).unwrap();
+                assert_eq!(decoded["total"], count / 2);
+                assert_eq!(decoded["rows"].as_array().unwrap().len() as u64, limit);
+                if format == "columns" {
+                    assert_eq!(decoded["columns"].as_array().unwrap().len(), 5);
+                    assert_eq!(decoded["rows"][0][0], "2");
+                    assert_eq!(
+                        decoded["rows"][(limit - 1) as usize][0],
+                        (limit * 2).to_string()
+                    );
+                }
+                // 游标绑定各自会话，业务荷载必须一致。
+                assert_eq!(decoded["rows"], rpc_json["result"]["rows"]);
+                println!(
+                    "entities={count} rows={limit} format={format} rpc_bytes={} {} mcp_bytes={} mcp_text_bytes={} {}",
+                    rpc_response.len(),
+                    latencies(rpc_times),
+                    mcp_response.len(),
+                    text.len(),
+                    latencies(mcp_times),
+                );
+            }
         }
-        let mut times = [0; 40];
-        for time in &mut times {
-            let start = Instant::now();
-            let response = black_box(agent.handle_line(&request).unwrap());
-            *time = start.elapsed().as_micros();
-            assert_eq!(response.len(), warmup.len());
-        }
-        times.sort_unstable();
-        println!(
-            "entities={count} rows=200 bytes={} median_us={} p95_us={}",
-            warmup.len(),
-            times[20],
-            times[37]
-        );
     }
+}
+
+#[test]
+#[ignore = "用 release 测量一百次字段编辑的计划和提交往返"]
+fn edit_transaction_budget() {
+    let mut agent = Agent::new();
+    restore(&mut agent, (1..=12_000).map(|id| entity(id, 0.0)).collect());
+    let plans = ["第一组", "第二组"].map(|name| {
+        let commands: Vec<_> = (1..=100)
+            .map(|id| xgc_world::Command::SetField {
+                entity: EntityId::from_raw(id),
+                component: Name::ID,
+                field: "value".into(),
+                value: Value::String(name.into()),
+            })
+            .collect();
+        json!({"commands": commands})
+    });
+    let mut times = [0; SAMPLES];
+    for trial in 0..WARMUP + SAMPLES {
+        let revision = agent.world().revision();
+        let params = plans[trial % 2].clone();
+        let start = Instant::now();
+        let plan = result(&mut agent, "edit.plan", params);
+        let applied = result(
+            &mut agent,
+            "edit.apply",
+            json!({"plan_id": plan["plan_id"], "base_revision": revision}),
+        );
+        let micros = start.elapsed().as_micros();
+        assert_eq!(plan["valid"], true, "{plan}");
+        assert_eq!(plan["commands"], 100);
+        assert_eq!(applied["revision"], revision + 1);
+        assert_eq!(applied["inverse"].as_array().unwrap().len(), 100);
+        if trial >= WARMUP {
+            times[trial - WARMUP] = micros;
+        }
+    }
+    let query = result(
+        &mut agent,
+        "world.query",
+        json!({"select": ["core.name:value"], "limit": 100}),
+    );
+    for (id, row) in (1..=100).zip(query["rows"].as_array().unwrap()) {
+        assert_eq!(row["id"], id.to_string());
+        assert_eq!(row["values"]["core.name:value"]["value"], "第二组");
+    }
+    let expected_hash = agent.world().state_hash();
+    let replay = result(&mut agent, "engine.replay", Json::Null);
+    assert_eq!(replay["records"], WARMUP + SAMPLES);
+    assert_eq!(replay["hash"], expected_hash);
+    println!("entities=12000 edit_ops=100 {}", latencies(times));
 }

@@ -114,6 +114,7 @@ fn tools_advertise_their_actual_inputs() {
     assert_eq!(query["cursor"]["type"], json!(["string", "null"]));
     assert_eq!(query["limit"]["default"], 100);
     assert_eq!(query["select"]["items"]["type"], "string");
+    assert_eq!(query["format"]["enum"], json!(["rows", "columns", null]));
     let filter = &query["filter"];
     assert_eq!(filter["required"], json!(["path", "op", "value"]));
     assert_eq!(

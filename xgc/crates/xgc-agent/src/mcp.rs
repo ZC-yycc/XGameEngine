@@ -91,8 +91,13 @@ impl Mcp {
         let text = match method.call(&mut self.agent, &arguments) {
             // 工具执行失败按 MCP 约定放进 isError，而不是 JSON-RPC 错误。
             Ok(value) => {
-                let text = serde_json::to_string_pretty(&value)
-                    .unwrap_or_else(|err| format!("结果序列化失败：{err}"));
+                // 列式结果供批量消费，缩进会重复写入每个单元格。
+                let text = if value.get("columns").is_some() {
+                    value.to_string()
+                } else {
+                    serde_json::to_string_pretty(&value)
+                        .unwrap_or_else(|err| format!("结果序列化失败：{err}"))
+                };
                 json!({
                     "content": [{"type": "text", "text": text}],
                     "isError": false

@@ -53,6 +53,10 @@ pub(super) fn query() -> Json {
                 "items": field_path,
                 "description": "指定字段时返回 rows，缺少或为 null 时返回完整 entities。"
             },
+            "format": {
+                "enum": ["rows", "columns", null], "default": "rows",
+                "description": "columns 需要 select，返回类型目录 columns 和按列排列的 rows。首列为实体 ID，其余列按 select 排列，缺失值为 null。"
+            },
             "filter": {
                 "type": ["object", "null"],
                 "properties": {

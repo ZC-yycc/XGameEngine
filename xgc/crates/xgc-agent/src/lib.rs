@@ -28,7 +28,8 @@ mod container_tests;
 
 pub use mcp::Mcp;
 use query::{
-    axis_index, FieldRef, Filter, FilterOp, QueryEpoch, QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT,
+    axis_index, projected_columns, projected_rows, FieldRef, Filter, FilterOp, QueryEpoch,
+    QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT,
 };
 
 pub const PROTOCOL: &str = "xgc.agent/1";
@@ -102,7 +103,11 @@ impl Agent {
         let result = self.call(&method, &params);
         let id = id?;
         Some(match result {
-            Ok(value) => json!({"jsonrpc": "2.0", "id": id, "result": value}).to_string(),
+            Ok(value) => {
+                let mut response = json!({"jsonrpc": "2.0", "id": id});
+                response["result"] = value;
+                response.to_string()
+            }
             Err(message) => error_response(id, message),
         })
     }
@@ -153,6 +158,15 @@ impl Agent {
             None => None,
         };
         let select = self.parse_select(params)?;
+        let columns = match params.get("format").filter(|value| !value.is_null()) {
+            None => false,
+            Some(value) => match value.as_str() {
+                Some("rows") => false,
+                Some("columns") if select.is_some() => true,
+                Some("columns") => return Err("列式查询需要 select".into()),
+                _ => return Err("format 只接受 rows 或 columns".into()),
+            },
+        };
         let filter = self.parse_filter(params)?;
         let revision = self.world.revision();
         let after = params
@@ -194,22 +208,13 @@ impl Agent {
             "next_cursor": next_cursor,
         });
         if let Some(fields) = select {
-            let rows: Vec<_> = page
-                .iter()
-                .map(|&id| {
-                    let mut values = serde_json::Map::new();
-                    for field in &fields {
-                        let value = field
-                            .read(&self.world, id, |value| {
-                                serde_json::to_value(value).unwrap_or(Json::Null)
-                            })
-                            .unwrap_or(Json::Null);
-                        values.insert(field.label.clone(), value);
-                    }
-                    json!({"id": id, "values": values})
-                })
-                .collect();
-            result["rows"] = Json::Array(rows);
+            if columns {
+                let (columns, rows) = projected_columns(&self.world, page, &fields);
+                result["columns"] = columns;
+                result["rows"] = rows;
+            } else {
+                result["rows"] = projected_rows(&self.world, page, &fields);
+            }
         } else {
             let entities: Vec<_> = page
                 .iter()
@@ -295,10 +300,11 @@ impl Agent {
             .iter()
             .find(|item| item.name == field.root())
             .ok_or_else(|| format!("组件 {component} 没有字段 {}", field.root()))?;
-        field.schema(root)?;
+        let schema_field = field.schema(root)?;
         Ok(FieldRef {
             component: ComponentId(schema.id),
             label: path.to_string(),
+            ty: schema_field.ty.clone(),
             path: field,
         })
     }

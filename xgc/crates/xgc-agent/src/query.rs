@@ -5,7 +5,7 @@ use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-use serde_json::Value as Json;
+use serde_json::{json, Value as Json};
 use xgc_base::EntityId;
 use xgc_reflect::{ComponentId, FieldPath, Value};
 use xgc_world::World;
@@ -59,6 +59,7 @@ fn decode_cursor(token: &str) -> Option<(u64, u64, EntityId)> {
 pub(super) struct FieldRef {
     pub(super) component: ComponentId,
     pub(super) label: String,
+    pub(super) ty: String,
     pub(super) path: FieldPath,
 }
 
@@ -72,6 +73,88 @@ impl FieldRef {
         let root = world.get_field(id, self.component, self.path.root())?;
         self.path.read(&root).ok().map(project)
     }
+}
+
+/// 类型已在列目录中声明，单元格直接携带字段值。
+fn column_value(value: &Value) -> Json {
+    fn vector(values: &[f64]) -> Json {
+        Json::Array(values.iter().copied().map(Json::from).collect())
+    }
+
+    match value {
+        Value::Bool(value) => Json::from(*value),
+        Value::I64(value) => Json::from(*value),
+        Value::F64(value) => Json::from(*value),
+        Value::String(value) => Json::String(value.clone()),
+        Value::Entity(value) => Json::String(EntityId::from_raw(*value).to_string()),
+        Value::Vec2(values) => vector(values),
+        Value::Vec3(values) => vector(values),
+        Value::Vec4(values) | Value::Quat(values) => vector(values),
+        Value::List(values) => Json::Array(values.iter().map(column_value).collect()),
+        Value::Struct(values) | Value::Map(values) => Json::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), column_value(value)))
+                .collect(),
+        ),
+        Value::Enum { variant, payload } => Json::Object(
+            [
+                ("variant".into(), Json::String(variant.clone())),
+                ("payload".into(), column_value(payload)),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    }
+}
+
+pub(super) fn projected_rows(world: &World, ids: &[EntityId], fields: &[FieldRef]) -> Json {
+    Json::Array(
+        ids.iter()
+            .map(|&id| {
+                let mut values = serde_json::Map::new();
+                for field in fields {
+                    let value = field
+                        .read(world, id, |value| {
+                            serde_json::to_value(value).unwrap_or(Json::Null)
+                        })
+                        .unwrap_or(Json::Null);
+                    values.insert(field.label.clone(), value);
+                }
+                let mut row = json!({"id": id});
+                row["values"] = Json::Object(values);
+                row
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn projected_columns(
+    world: &World,
+    ids: &[EntityId],
+    fields: &[FieldRef],
+) -> (Json, Json) {
+    let columns = std::iter::once(json!({"name": "id", "type": "entity"}))
+        .chain(
+            fields
+                .iter()
+                .map(|field| json!({"name": field.label, "type": field.ty})),
+        )
+        .collect();
+    let rows = ids
+        .iter()
+        .map(|&id| {
+            let mut row = Vec::with_capacity(fields.len() + 1);
+            row.push(Json::String(id.to_string()));
+            row.extend(
+                fields
+                    .iter()
+                    .map(|field| field.read(world, id, column_value).unwrap_or(Json::Null)),
+            );
+            Json::Array(row)
+        })
+        .collect();
+    (Json::Array(columns), Json::Array(rows))
 }
 
 pub(super) struct Filter {

@@ -82,7 +82,9 @@ HUD 图片按项目相对路径或 GUID 从同一资产目录读取。GPU 回归
 
 ## Agent 查询与重放
 
-`world.query` 按持久实体 ID 升序返回结果。继续翻页时将上一页的 `next_cursor` 填入 `cursor` 并沿用筛选条件。写事务或更换世界后旧游标失效。查询先筛选 ID，只为当前页读取投影字段或完整实体。对 1,000 和 12,000 实体的世界查询 200 行、每行 4 个字段，本机 Release 的 JSON-RPC 中位耗时分别为 1.917 和 2.323 毫秒，响应仍约 53 KB。[查询回归与测量](crates/xgc-agent/tests/query.rs)
+`world.query` 按持久实体 ID 升序返回结果。继续翻页时将上一页的 `next_cursor` 填入 `cursor` 并沿用筛选条件。写事务或更换世界后旧游标失效。查询先筛选 ID，只为当前页读取投影字段或完整实体。投影查询可指定 `format: "columns"`，返回按 `select` 排列的类型目录和数组行，首列为十进制字符串 ID。缺失字段为 `null`，组件中的实体引用也用十进制字符串。MCP 的 `world_query` 以紧凑 JSON 返回列式结果。[查询与 MCP 回归](crates/xgc-agent/tests/query.rs)
+
+同机 Release 在 12,000 实体中筛选并查询 1,000 行、每行 4 个字段，预热 4 轮后采样 40 轮。JSON-RPC 行式响应的 p50、p95、p99 由 7.993、9.268、9.425 ms 降至 3.832、3.941、4.019 ms。列式响应为 1.808、1.854、1.889 ms，MCP 列式 p99 为 2.354 ms。200 行的 MCP 正文由 124,457 字节降至 12,855 字节，距约 10 KB 的目标仍有差距，省略缺省值尚待实现。100 操作事务的计划与提交合计 p50、p95、p99 为 1.159、1.192、1.227 ms。回归检查了每次事务 revision 加一、全部修改生效与日志重放哈希一致。计时包含协议解析和响应序列化，进程间传输延迟另计。[Release 测量](crates/xgc-agent/tests/query.rs)
 
 `edit.undo` 与 `edit.revert` 成功后会记录逆向事务。回归覆盖误删、恢复、后续编辑与重放，逐项比对世界状态、哈希及 revision。[协议回归](crates/xgc-agent/tests/protocol.rs)
 
