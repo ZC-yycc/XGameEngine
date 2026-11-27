@@ -154,7 +154,7 @@ pub(super) static METHODS: &[Method] = &[
     ),
     Method::new(
         "world.explain",
-        "解释实体的渲染模型抽取，返回选中的模型引用或排除原因。",
+        "解释实体的渲染模型抽取，返回选中的模型引用或排除原因。可指定 physics_with 解释当前场景快照的一对刚体形状重叠。",
         schemas::explain,
         |agent, params| explain::explain(agent.world(), params),
     ),

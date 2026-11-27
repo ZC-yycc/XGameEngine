@@ -59,7 +59,7 @@ pub use input::{
 };
 pub use mixer::{write_wav_mono, SoftwareMixer};
 pub use particles::{ParticleStats, ParticleSystem};
-pub use rapier_world::{RapierPhysicsSystem, RapierWorld, FIXED_DT};
+pub use rapier_world::{ColliderOverlap, OverlapBody, RapierPhysicsSystem, RapierWorld, FIXED_DT};
 pub use root_motion::apply_root_motion;
 pub use skeleton::{parse_pose, SkeletonPoseSystem};
 pub use systems::{

@@ -21,9 +21,11 @@ use crate::{System, SystemAccess};
 
 mod bodies;
 mod characters;
+mod explain;
 mod slopes;
 use bodies::{isometry, world_transform, BodyLink, BodySignature};
 use characters::CharacterLink;
+pub use explain::{ColliderOverlap, OverlapBody};
 use slopes::{SlopeEntry, SlopeLink, SlopeSignature};
 
 /// 旧引擎 `PhysicsConfig::default()` 的重力。

@@ -98,6 +98,10 @@ pub(super) fn explain() -> Json {
                 "type": ["number", "null"], "minimum": -max, "maximum": max,
                 "default": DEFAULT_LOD_BIAS,
                 "description": "渲染器使用的有效 LOD 距离倍率，非正值固定使用首个可用级。"
+            },
+            "physics_with": {
+                "description": "另一实体的持久 ID。指定后返回当前场景快照中两个 physics.body 正常建体后的形状重叠和传感器状态。传感器重叠不会产生分离冲量。历史轨迹需用仿真查看。",
+                "oneOf": [unsigned(u64::MAX), decimal_id(), {"type": "null"}]
             }
         }),
         &["id"],

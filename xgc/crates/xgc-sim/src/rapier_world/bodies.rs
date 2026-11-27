@@ -126,7 +126,7 @@ impl RapierWorld {
     /// 走 `Transform::from_matrix`（glam 的 `to_scale_rotation_translation`），
     /// 场景里手写的 `(0.2, 0, 0, 0.98)` 这类非单位旋转到旧端是合法姿态、到 rapier
     /// 直接当 `UnitQuaternion` 用会得到非正交矩阵（落地接触分叉的根因）。
-    fn insert_body(&mut self, world: &World, key: EntityKey) -> Option<BodyLink> {
+    pub(super) fn insert_body(&mut self, world: &World, key: EntityKey) -> Option<BodyLink> {
         let def = world.get::<PhysicsBody>(key)?.clone();
         let world_transform = world_transform(world, key, &mut self.body_transform_chain)?;
         let (body, collider) = build_body(&def, &world_transform);

@@ -138,6 +138,8 @@ HUD 图片按项目相对路径或 GUID 从同一资产目录读取。GPU 回归
 
 `world.explain` 与 MCP 的 `world_explain` 共用渲染器的模型抽取判据。给定相机实体或眼点时返回选中的模型，或报告缺少组件、全局变换、模型引用以及超出有限 LOD 距离等排除原因。结果覆盖资产加载前的抽取阶段。[诊断回归](crates/xgc-agent/tests/explain.rs)
 
+`world.explain` 可加 `physics_with` 指定另一实体。Rapier 按当前场景快照的真实建体规则生成两具碰撞体，返回形状是否相交、刚体类型与传感器标志，包括有父节点的 Auto 形状。MCP 回归中只切换平台的传感器标志，球在第 60 步的高度分别为 −2.050436 m 和 2.998722 m，与解释中的穿过和阻挡一致。解释针对快照初始几何，后续位姿与求解结果可用 `sim.run` 复验。[物理诊断进程回归](crates/xgc-cli/tests/mcp_explain_physics.rs)
+
 `script.check` 及 MCP 的 `script_check` 接受内联 Lua 源码，`xgc script-check <脚本.lua>` 读取单文件。这两个入口和项目体检都调用运行时的 Lua 5.4 文本编译器，语法错误为 `SCRIPT.COMPILE`，包含可确定的脚本名与行号。检查不执行脚本。 [脚本检查回归](crates/xgc-agent/tests/script_check.rs)
 
 Lua VM 默认使用 128 MiB 内存上限。每次钩子调用有约 20 万条指令额度，调用内协程共用额度。超限结束当前调用，后续钩子仍可使用同一 VM。Lua 文件由宿主装载，运行时动态编译只接受文本。回归覆盖会恢复的协程、受保护调用、内存诊断和下一次调用恢复。引入沙箱限制时，两项回归分别核对了 showcase 的 151 个脚本轨迹检查点和角色场景的第 120 帧哈希。[沙箱回归](crates/xgc-script/tests/sandbox.rs)

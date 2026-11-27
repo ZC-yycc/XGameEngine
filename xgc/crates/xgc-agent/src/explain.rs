@@ -1,9 +1,10 @@
-//! 只读诊断使用渲染器的模型抽取判据。
+//! 只读诊断复用渲染器的模型抽取和 Rapier 的建体口径。
 
 use serde_json::{json, Value as Json};
-use xgc_base::EntityId;
+use xgc_base::{EntityId, EntityKey};
 use xgc_render::{camera_view_projection_with_eye, explain_draw_model, ModelExtractionFailure};
-use xgc_world::{Camera, GlobalTransform, World};
+use xgc_sim::{OverlapBody, RapierWorld};
+use xgc_world::{BodyKind, Camera, GlobalTransform, World};
 
 use crate::required_u64;
 
@@ -37,7 +38,7 @@ pub(super) fn explain(world: &World, params: &Json) -> Result<Json, String> {
         Ok(model) => (Some(model), None),
         Err(reason) => (None, Some(reason_code(reason))),
     };
-    Ok(json!({
+    let mut result = json!({
         "entity": id,
         "render": {
             "stage": "model_extraction",
@@ -47,7 +48,48 @@ pub(super) fn explain(world: &World, params: &Json) -> Result<Json, String> {
             "eye": eye,
             "lod_bias": lod_bias,
         },
+    });
+    if provided(params, "physics_with").is_some() {
+        result["physics"] = explain_physics(world, key, params)?;
+    }
+    Ok(result)
+}
+
+fn explain_physics(world: &World, key: EntityKey, params: &Json) -> Result<Json, String> {
+    let other_id = EntityId::from_raw(required_u64(params, "physics_with")?);
+    let other = world
+        .key(other_id)
+        .ok_or_else(|| format!("未知 physics_with 实体：{other_id}"))?;
+    if other == key {
+        return Err("physics_with 必须是另一实体的 ID".into());
+    }
+    let pair = RapierWorld::snapshot_overlap(world, key, other);
+    let reason = match (pair.body, pair.other_body, pair.intersects) {
+        (None, _, _) | (_, None, _) => "missing_body",
+        (_, _, Some(false)) => "shapes_disjoint",
+        (Some(a), Some(b), Some(true)) if a.sensor || b.sensor => "sensor_overlap",
+        (_, _, Some(true)) => "solid_overlap",
+        (_, _, None) => "shape_query_unsupported",
+    };
+    Ok(json!({
+        "stage": "collider_overlap",
+        "source": "scene_snapshot",
+        "revision": world.revision(),
+        "other": other_id,
+        "body": pair.body.map(overlap_body),
+        "other_body": pair.other_body.map(overlap_body),
+        "intersects": pair.intersects,
+        "reason": reason,
     }))
+}
+
+fn overlap_body(body: OverlapBody) -> Json {
+    let kind = match body.kind {
+        BodyKind::Static => "static",
+        BodyKind::Kinematic => "kinematic",
+        BodyKind::Dynamic => "dynamic",
+    };
+    json!({"kind": kind, "sensor": body.sensor})
 }
 
 fn explicit_camera_eye(world: &World, params: &Json) -> Result<[f32; 3], String> {
