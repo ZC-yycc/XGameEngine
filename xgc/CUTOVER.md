@@ -63,6 +63,12 @@ AABB 加入空间树后，仍按实体 ID 求解，分离改变位置时刷新�
 
 输出根目录的 `entity-id-map.json` 与场景、预制体一起发布。`files` 中每项以 `source` 和 `target` 标识走过迁移的文件，`ids` 的键和值都是十进制字符串。例如 `{"source":"Scenes/a.ron","target":"scenes/a.json","ids":{"42":"2"}}` 表示该文件的旧实体 `42` 迁为 `2`。每个世界新增实体的初始分配位置都高于本次迁出的场景和预制体实体。单场景迁移保留旧 ID，供下文的逐帧对表使用。
 
+## 迁移 Lua 接口审计
+
+干跑和正式项目迁移都会输出 `lua-api` 段。新版名单来自生产 Lua 挂载环境，旧版名单固定自旧引擎的 `--export-script-api` 目录。182 个旧全局函数中，68 个同名引擎绑定已注册，112 个无对应函数，`error` 和 `warn` 同名但解析为 Lua 标准函数。报告按分类逐名列出缺项，并记录钩子、物理、碰撞、生成、变换及动画的结算时序。`projects/XGame` 的八个脚本使用 31 个不同的旧接口名，实测均有引擎绑定。逐名注册审计衡量可见性，具体语义由运行回归验收。[旧版名单](crates/xgc-migrate/src/legacy_lua_api.txt) · [运行时探测](crates/xgc-script/src/api.rs) · [迁移回归](crates/xgc-cli/tests/migrate_project.rs)
+
+真实项目回归核对两种迁移的审计段相同、干跑未写目标目录、迁移后脚本和原文件逐字节一致。首行项目汇总和退出码沿用原协议。
+
 ## 项目只读检查
 
 `xgc check <旧项目目录>` 检查迁移源。迁移后运行 `xgc check <输出目录>` 或 `xgc check <输出目录>/project.xgc`，检查清单里的场景、原生预制体、父子关系、跨文件实体 ID、预制体来源、GUID 与项目相对路径引用，以及清单登记的输入映射。检查过程只读文件，并按解析后的路径对引用的 Lua 脚本去重、编译。目录存在原生清单时始终采用原生格式。
@@ -155,11 +161,11 @@ glTF 的三次样条 TRS 轨道保留入切线、关键值和出切线。姿势�
 
 持久实体 ID 保留 `u64::MAX` 作为分配游标耗尽标记，`u64::MAX - 1` 仍可使用。JSON、XGCB、世界恢复和 Spawn/Replace 在接收实体时共用这一校验。回归覆盖非法输入保留原快照和实体句柄，以及 Agent 采样、编辑器新建和 Lua 生成实体的错误反馈。[世界边界回归](crates/xgc-world/tests/entity_ids.rs) · [Lua 边界回归](crates/xgc-script/tests/entity_ids.rs)
 
-Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑时间和名称，并撤销修改。Agent 使用 `animation.animator:events[0].time` 查询，在 `edit.plan` 的组件字段中写 `events[0].time`。路径下标从 0 起。Lua `xgc.get` 返回的列表按 Lua 约定从 1 起，`xgc.set` 可以按零基路径改写叶字段。
+Inspector 的 `animation.animator → events` 可以增删事件，逐项编辑时间和名称，并撤销修改。Agent 使用 `animation.animator:events[0].time` 查询，在 `edit.plan` 的组件字段中写 `events[0].time`。路径下标从 0 起。项目 Lua 的 `xgc.set` 也使用零基路径改写叶字段。
 
 `render.lod → levels` 同样可以增删和逐项编辑。模型与最大距离分别是 `levels[0].model` 和 `levels[0].max_distance`，距离单位为米，零或负值代表无限距离。项目检查会报告具体层级的模型引用，打包会保留仅由 LOD 引用的相对路径和 GUID 资产。运行时按实体世界轴心到相机的距离选级，超出全部有限距离时主绘制、方向光和点光阴影一起跳过。取景和根运动使用首个可绘制模型。CLI、原生编辑器与播放器使用同一项目 LOD 偏置与画质档缩放。GPU 回归确认超距与移除实体逐像素相同，showcase 的 151 帧轨迹与同机四张严格截图通过。
 
-递归字段支持字符串键映射与带载荷的枚举。`settings["main.gain"].Scaled.factor` 先取映射中已有的键，再取当前 `Scaled` 分支的载荷。键按 JSON 字符串规则转义。Inspector 用增删条目或切换分支替换容器整值，切换时使用该分支的缺省载荷。Agent 通过同一字段路径读取和更新，事务可撤销。Lua `xgc.get` 将映射读成字符串键表，将枚举读成带 `variant` 和 `payload` 两键的表。
+递归字段支持字符串键映射与带载荷的枚举。`settings["main.gain"].Scaled.factor` 先取映射中已有的键，再取当前 `Scaled` 分支的载荷。键按 JSON 字符串规则转义。Inspector 用增删条目或切换分支替换容器整值，切换时使用该分支的缺省载荷。Agent 通过同一字段路径读取和更新，事务可撤销。
 
 基础动画状态机直接保存机器定义与运行参数。Inspector 和 Agent 可编辑 `machine.states[0].clip`、`machine.transitions[0].when.AtLeast.value` 与 `parameters["speed"]`。转移来源可选任意状态或具名状态，条件支持无条件、达到阈值和低于阈值。模拟直接读取类型化机器，Lua 的 `set_anim_param` 同帧写入累积在同一张参数表。
 

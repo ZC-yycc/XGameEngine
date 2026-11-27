@@ -1,0 +1,24 @@
+# 冻结的旧 Lua API 名单，来源：5c606bb2fb63848458bc070cee3fc122d93bac22 的 crates/xgame-core/src/script_api.rs。
+# 每行先写分类 ID，其后为该分类下的全局函数。分类与函数名各按字典序排列。
+# 用旧工作区的真实清单重建数据行：
+# cargo run -q -p xgame-editor -- --export-script-api --out legacy.json
+# python -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); [print(c['id'],*sorted(f['name'] for f in c['functions'])) for c in sorted(d['categories'],key=lambda c:c['id'])]" legacy.json
+# 本快照由同一源文件的 FUNCTIONS 声明提取，导出的分类与函数恰由该声明生成。
+animation morph set_anim_additive_clip set_anim_additive_weight set_anim_clip set_anim_fade_time set_anim_looping set_anim_param set_anim_speed set_morph
+animation_layers set_anim_layer_clip set_anim_layer_param set_anim_layer_weight
+audio bus_volume play_sound play_sound_at play_sound_at_bus play_sound_bus set_bus_volume set_listener set_master_volume stop_all_sounds stop_sound
+camera active_camera camera_fov look_at look_at_entity set_active_camera set_camera_fov
+character character_ground_normal character_is_grounded character_is_sliding character_jump character_move character_set_velocity character_simple_move character_velocity
+entity destroy distance_to entity_at entity_count entity_forward entity_id entity_model entity_name entity_pos entity_rot entity_scale set_entity_model set_entity_pos set_entity_rot set_entity_scale set_parent
+input action_down action_pressed action_released axis key_down key_pressed mouse_delta mouse_down mouse_pos mouse_pressed pad_axis pad_button_down pad_connected scroll touch touch_count
+material clear_material material_asset set_material set_material_asset
+math clamp deg_to_rad lerpf rad_to_deg vadd vcross vdistance_to vdot vec2 vec3 vlength vlength_squared vlerp vmul vnormalized vsub vtostring
+particle particle_burst particle_emitting set_particle_emitting set_particle_rate
+physics add_torque apply_force apply_impulse gravity has_physics layer raycast raycast_masked set_gravity set_layer set_velocity velocity
+save entity_save_get entity_save_set has_save load_game save_game save_get save_remove save_set save_slots
+scene current_scene load_scene load_scene_at scene_count scene_index
+spawn spawn_ball spawn_entity spawn_entity_at spawn_prefab spawn_prefab_under spawn_static_box
+state state_clear state_get state_get_or state_has state_remove state_set
+time delta error log set_time_scale time time_scale warn
+transform forward local_pos pos right rot rotate scale self_id self_name set_local_pos set_pos set_rot set_scale translate up
+ui ui_clear_focus ui_clicked ui_enabled ui_focused ui_has ui_hovered ui_set_anchor ui_set_bg_color ui_set_enabled ui_set_fill ui_set_focus ui_set_image ui_set_image_tint ui_set_offset ui_set_pos ui_set_radius ui_set_rect ui_set_size ui_set_text ui_set_text_align ui_set_text_color ui_set_text_size ui_set_visible ui_spawn_button ui_spawn_image ui_spawn_label ui_spawn_panel ui_text ui_visible

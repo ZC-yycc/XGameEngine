@@ -6,7 +6,10 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use xgc_migrate::{migrate_dir, migrate_old_project, migrate_str, ProjectMigrationError};
+use xgc_migrate::{
+    migrate_dir, migrate_old_project, migrate_str, render_lua_api_report, ProjectMigrationError,
+};
+use xgc_script::mounted_lua_api;
 use xgc_store::save_world;
 
 pub(crate) fn migrate(input: Option<&str>, output: Option<&str>, flag: Option<&str>) -> ExitCode {
@@ -94,6 +97,14 @@ fn migrate_project(input: &Path, output: &Path, dry_run: bool) -> ExitCode {
     match migrate_old_project(input, output, dry_run) {
         Ok(report) => {
             println!("{}", report.render());
+            // 接口对照是迁移提示。宿主无法启动时仍保留文件转换的原退出码。
+            match mounted_lua_api() {
+                Ok(api) => println!(
+                    "{}",
+                    render_lua_api_report(&api.globals, &api.standard_globals, &api.namespace)
+                ),
+                Err(err) => println!("  lua-api: unavailable ({err})"),
+            }
             ExitCode::SUCCESS
         }
         Err(ProjectMigrationError::Problems(problems)) => {

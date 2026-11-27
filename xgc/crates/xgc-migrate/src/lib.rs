@@ -22,6 +22,7 @@ use xgc_world::{
 pub const OLD_SCENE_FORMAT_VERSION: u32 = 2;
 mod compare;
 mod environment;
+mod lua_api_report;
 mod old_animator;
 mod old_character;
 mod old_lod;
@@ -35,6 +36,7 @@ mod report;
 mod transform_migrate;
 mod verify;
 pub use compare::{compare_headless, CompareReport, Stats};
+pub use lua_api_report::render_lua_api_report;
 pub use project_check::{
     check_old_project, read_old_render, ProjectCheckError, ProjectCheckReport,
     OLD_PROJECT_FORMAT_VERSION,

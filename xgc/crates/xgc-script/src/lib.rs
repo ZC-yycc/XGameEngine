@@ -13,6 +13,7 @@ use xgc_world::{builtin_registry, Command, Transform, World};
 
 use lua_value::{lua_to_value, value_to_lua};
 
+mod api;
 mod audio_api;
 mod budget;
 mod character_api;
@@ -28,6 +29,7 @@ mod ui_api;
 mod ui_focus_api;
 mod ui_spawn_api;
 mod view;
+pub use api::{mounted_lua_api, MountedLuaApi};
 pub use audio_api::ScriptAudio;
 pub use compile::check_source;
 pub use legacy::{euler_to_quat, EntityView, ScriptView};
@@ -93,11 +95,21 @@ impl LuaHost {
         self_id: u64,
     ) -> Result<Self, String> {
         let mut host = Self::new()?;
-        host.register_commands(&commands, Some(Rc::clone(&view)))?;
-        host.state = Some(legacy::register(&host.lua, &commands, &view, self_id)?);
-        host.commands = Some(commands);
-        host.self_id = self_id;
+        host.register_mounted(commands, view, self_id)?;
         Ok(host)
+    }
+
+    fn register_mounted(
+        &mut self,
+        commands: Rc<RefCell<Vec<Command>>>,
+        view: Rc<RefCell<ScriptView>>,
+        self_id: u64,
+    ) -> Result<(), String> {
+        self.register_commands(&commands, Some(Rc::clone(&view)))?;
+        self.state = Some(legacy::register(&self.lua, &commands, &view, self_id)?);
+        self.commands = Some(commands);
+        self.self_id = self_id;
+        Ok(())
     }
 
     fn register_commands(
