@@ -149,6 +149,12 @@ fn tools_advertise_their_actual_inputs() {
         assert_eq!(types[1]["type"], "string");
     }
 
+    let apply = &schema("edit_apply")["properties"];
+    assert_eq!(apply["idempotency_key"]["type"], json!(["string", "null"]));
+    assert_eq!(apply["base_revision"]["oneOf"][0]["type"], "integer");
+    assert_eq!(apply["base_revision"]["oneOf"][1]["type"], "string");
+    assert_eq!(apply["base_revision"]["oneOf"][2]["type"], "null");
+
     let script = &schema("script_check")["properties"];
     assert_eq!(script["source"]["type"], "string");
     assert_eq!(script["name"]["type"], json!(["string", "null"]));
@@ -252,6 +258,33 @@ fn tools_forward_commands_snapshots_and_string_ids() {
     let restored = invoke(&mut mcp, "world_restore", json!({"data": snapshot["data"]}));
     assert_eq!(restored["entities"], 1);
     assert_eq!(invoke(&mut mcp, "world_get", json!({"id": id})), entity);
+}
+
+#[test]
+fn edit_apply_retries_the_success_and_wraps_key_conflicts() {
+    let mut mcp = Mcp::new();
+    let plan = invoke(&mut mcp, "edit_plan", json!({"commands": []}));
+    let args = json!({"plan_id": plan["plan_id"], "base_revision": 0, "idempotency_key": "mcp"});
+    let receipt = invoke(&mut mcp, "edit_apply", args.clone());
+    assert_eq!(receipt, json!({"tx_id": 0, "revision": 0, "inverse": []}));
+    assert_eq!(invoke(&mut mcp, "edit_apply", args), receipt);
+
+    let other = invoke(&mut mcp, "edit_plan", json!({"commands": []}));
+    let conflict = call(
+        &mut mcp,
+        "tools/call",
+        json!({
+            "name": "edit_apply", "arguments": {"plan_id": other["plan_id"], "idempotency_key": "mcp"}
+        }),
+    );
+    assert!(conflict.get("error").is_none());
+    assert_eq!(conflict["result"]["isError"], true);
+    assert_eq!(conflict["result"]["content"][0]["type"], "text");
+    assert!(conflict["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("idempotency_key"));
+    assert_eq!(invoke(&mut mcp, "engine_history", json!({}))["count"], 1);
 }
 
 #[test]

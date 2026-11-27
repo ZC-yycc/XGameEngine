@@ -116,7 +116,20 @@ pub(super) fn world_path() -> Json {
 }
 
 pub(super) fn apply() -> Json {
-    required_param("plan_id", id_param("edit.plan 返回的计划 ID。"))
+    object(
+        json!({
+            "plan_id": id_param("edit.plan 返回的计划 ID。"),
+            "base_revision": {
+                "oneOf": [unsigned(u64::MAX), decimal_id(), {"type": "null"}],
+                "description": "首次提交时要求当前世界版本等于此值。缺少或为 null 时仍检查计划的基准版本。"
+            },
+            "idempotency_key": {
+                "type": ["string", "null"],
+                "description": "当前编辑会话内，凭此键和原 plan_id 重取成功回执。一个键只用于一份已提交的计划，加载或恢复世界会重置。"
+            }
+        }),
+        &["plan_id"],
+    )
 }
 
 pub(super) fn revert() -> Json {

@@ -13,6 +13,7 @@ use xgc_reflect::{ComponentId, FieldPath, Registry};
 use xgc_store::{load_world, save_world};
 use xgc_world::{Applied, Command, Journal, Plan, World, WorldSnapshot};
 
+mod edit_apply;
 mod explain;
 mod mcp;
 mod methods;
@@ -38,6 +39,7 @@ pub struct Agent {
     registry: Registry,
     plans: HashMap<u64, Plan>,
     applied: HashMap<u64, Applied>,
+    apply_receipts: HashMap<String, edit_apply::ApplyReceipt>,
     journal: Journal,
     base: WorldSnapshot,
     next_plan: u64,
@@ -60,6 +62,7 @@ impl Agent {
             registry,
             plans: HashMap::new(),
             applied: HashMap::new(),
+            apply_receipts: HashMap::new(),
             journal: Journal::new(),
             base,
             next_plan: 0,
@@ -481,30 +484,6 @@ impl Agent {
             "preview": preview,
         });
         self.plans.insert(plan_id, plan);
-        Ok(response)
-    }
-
-    fn apply(&mut self, params: &Json) -> Result<Json, String> {
-        let plan_id = required_u64(params, "plan_id")?;
-        let plan = self
-            .plans
-            .remove(&plan_id)
-            .ok_or_else(|| format!("未知 plan_id：{plan_id}"))?;
-        let applied = self
-            .world
-            .apply_logged(&plan, &mut self.journal)
-            .map_err(|diagnostics| format!("应用失败：{diagnostics:?}"))?;
-        let tx_id = self
-            .journal
-            .records()
-            .last()
-            .map_or(0, |record| record.tx_id);
-        let response = json!({
-            "tx_id": tx_id,
-            "revision": applied.revision,
-            "inverse": applied.inverse,
-        });
-        self.applied.insert(tx_id, applied);
         Ok(response)
     }
 

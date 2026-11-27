@@ -38,6 +38,7 @@ impl Agent {
         self.query_epoch = QueryEpoch::new();
         self.plans.clear();
         self.applied.clear();
+        self.apply_receipts.clear();
         self.journal = Journal::new();
         Ok(json!({
             "revision": self.world.revision(),

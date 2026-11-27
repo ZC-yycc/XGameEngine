@@ -130,7 +130,7 @@ pub(super) static METHODS: [Method; 20] = [
     ),
     Method::new(
         "edit.apply",
-        "消费会话中的 plan_id 并提交有效计划。成功返回 tx_id、revision 和逆命令。",
+        "按计划提交编辑，可指定当前基准版本。成功返回 tx_id、revision 和逆命令，同一幂等键可重取回执。",
         schemas::apply,
         Agent::apply,
     ),
