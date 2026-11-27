@@ -53,10 +53,14 @@ pub struct ScriptedRunner {
 impl ScriptedRunner {
     /// 复用脚本与模型的 GUID 目录，并把预热后的网格缓存交给窗口渲染器。
     pub fn with_assets(world: World, assets: AssetPaths) -> (Self, MeshCache) {
+        Self::with_simulation(Simulation::new(world), assets)
+    }
+
+    /// 已选定固定步长的预览仍走同一套资产和脚本帧宿主。
+    pub fn with_simulation(simulation: Simulation, assets: AssetPaths) -> (Self, MeshCache) {
         let runtime = ScriptRuntime::with_assets(assets.clone());
         let mut meshes = MeshCache::with_assets(assets.clone());
-        let root_motion = meshes.root_motion_library(&world);
-        let simulation = Simulation::new(world);
+        let root_motion = meshes.root_motion_library(simulation.world());
         let audio = AudioStage::new(assets, simulation.fixed_dt());
         (
             Self {

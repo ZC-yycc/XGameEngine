@@ -131,6 +131,7 @@ fn deps(root: &Path) -> Result<(), String> {
             "xgc-agent",
             &[
                 "xgc-base",
+                "xgc-host",
                 "xgc-reflect",
                 "xgc-render",
                 "xgc-script",

@@ -138,6 +138,33 @@ pub(super) fn restore() -> Json {
     schema
 }
 
+pub(super) fn sim_run() -> Json {
+    use crate::sim_run::{MAX_DT, MAX_FRAMES, MAX_WATCHES, MIN_DT};
+
+    let mut watch = object(
+        json!({
+            "id": id_param("采样的持久实体 ID。"),
+            "path": {"type": "string", "description": "与 world.query 相同的组件:字段路径。"}
+        }),
+        &["id", "path"],
+    );
+    watch["additionalProperties"] = json!(false);
+    let mut schema = object(
+        json!({
+            "frames": unsigned(MAX_FRAMES),
+            "dt": {"type": "number", "minimum": MIN_DT, "maximum": MAX_DT,
+                   "description": "固定步秒数，省略时使用引擎默认值。"},
+            "project": {"type": "string", "minLength": 1,
+                        "description": "服务端原生项目目录或 project.xgc 路径。省略时只跑无资产系统。"},
+            "watch": {"type": "array", "maxItems": MAX_WATCHES, "items": watch,
+                      "description": "从第 0 帧起采样的实体字段，缺失值为 null。"}
+        }),
+        &["frames"],
+    );
+    schema["additionalProperties"] = json!(false);
+    schema
+}
+
 pub(super) fn plan() -> Json {
     let entity = decimal_id();
     let component = unsigned(u64::from(u32::MAX));

@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value as Json};
 
-use crate::{explain, schemas, script_check, Agent};
+use crate::{explain, schemas, script_check, sim_run, Agent};
 
 pub(super) struct Method {
     pub(super) name: &'static str,
@@ -43,7 +43,7 @@ impl Method {
     }
 }
 
-pub(super) static METHODS: [Method; 19] = [
+pub(super) static METHODS: [Method; 20] = [
     Method::new(
         "engine.describe",
         "查看协议版本、方法、组件与能力目录，以及当前世界的摘要。",
@@ -157,6 +157,12 @@ pub(super) static METHODS: [Method; 19] = [
         "解释实体的渲染模型抽取，返回选中的模型引用或排除原因。",
         schemas::explain,
         |agent, params| explain::explain(agent.world(), params),
+    ),
+    Method::new(
+        "sim.run",
+        "从当前世界的独立副本预览固定步，返回逐帧哈希与指定字段。",
+        schemas::sim_run,
+        |agent, params| sim_run::run(agent, params),
     ),
 ];
 

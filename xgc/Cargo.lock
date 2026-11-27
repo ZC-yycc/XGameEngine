@@ -3275,6 +3275,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "xgc-base",
+ "xgc-host",
  "xgc-reflect",
  "xgc-render",
  "xgc-script",

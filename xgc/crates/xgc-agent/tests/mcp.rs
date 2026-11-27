@@ -62,6 +62,7 @@ fn tools_list_exposes_every_agent_method() {
         "edit.undo",
         "script.check",
         "world.explain",
+        "sim.run",
     ];
     assert_eq!(description["methods"], json!(methods));
     let details = description["method_details"].as_array().unwrap();

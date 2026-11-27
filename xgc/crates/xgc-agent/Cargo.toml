@@ -8,6 +8,7 @@ description = "XGC Agent 协议最小集：describe / query / plan / apply / rev
 
 [dependencies]
 xgc-base = { path = "../xgc-base" }
+xgc-host = { path = "../xgc-host" }
 xgc-reflect = { path = "../xgc-reflect" }
 xgc-render = { path = "../xgc-render" }
 xgc-world = { path = "../xgc-world" }

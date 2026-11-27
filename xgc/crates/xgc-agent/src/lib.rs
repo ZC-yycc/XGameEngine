@@ -19,6 +19,7 @@ mod methods;
 mod query;
 mod schemas;
 mod script_check;
+mod sim_run;
 mod snapshot;
 
 #[cfg(test)]
