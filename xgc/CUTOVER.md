@@ -86,6 +86,8 @@ HUD 图片按项目相对路径或 GUID 从同一资产目录读取。GPU 回归
 
 `edit.undo` 与 `edit.revert` 成功后会记录逆向事务。回归覆盖误删、恢复、后续编辑与重放，逐项比对世界状态、哈希及 revision。[协议回归](crates/xgc-agent/tests/protocol.rs)
 
+`world.restore` 和 `world.load` 先构造完整世界，成功后才重置编辑基线。恢复失败时，现有快照、查询游标、待应用计划和撤销历史可以继续使用。即使恢复后的 revision 与原世界相同，成功恢复也会使旧游标失效。[恢复回归](crates/xgc-agent/tests/restore.rs)
+
 `sim.run` 与 MCP 的 `sim_run` 从编辑世界的副本预览最多 300 个固定步，返回第 0 帧起的哈希和最多 16 个实体字段的采样值。指定原生项目目录或清单时走共享脚本宿主，从项目解析 GUID 与搜索根。省略时只执行模拟系统。预览成功或失败后，编辑快照、查询游标、待应用计划和事务历史仍可继续使用。[预览回归](crates/xgc-agent/tests/sim_run.rs) · [MCP 进程回归](crates/xgc-cli/tests/mcp_sim_run.rs)
 
 `world.explain` 与 MCP 的 `world_explain` 共用渲染器的模型抽取判据。给定相机实体或眼点时返回选中的模型，或报告缺少组件、全局变换、模型引用以及超出有限 LOD 距离等排除原因。结果覆盖资产加载前的抽取阶段。[诊断回归](crates/xgc-agent/tests/explain.rs)

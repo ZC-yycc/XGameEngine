@@ -389,20 +389,7 @@ impl Agent {
     fn load(&mut self, params: &Json) -> Result<Json, String> {
         let path = required_str(params, "path")?;
         let data = load_world(Path::new(path)).map_err(|err| err.to_string())?;
-        let mut world = World::new();
-        world
-            .restore_world_data(&data)
-            .map_err(|message| format!("恢复失败：{message}"))?;
-        self.world = world;
-        self.query_epoch = QueryEpoch::new();
-        self.plans.clear();
-        self.applied.clear();
-        self.journal = Journal::new();
-        self.base = self.world.snapshot();
-        Ok(json!({
-            "revision": self.world.revision(),
-            "entities": self.world.len(),
-        }))
+        self.replace_edit_world(&data, "恢复失败")
     }
 
     fn save(&self, params: &Json) -> Result<Json, String> {
