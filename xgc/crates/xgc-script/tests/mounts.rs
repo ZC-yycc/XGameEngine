@@ -223,6 +223,157 @@ fn reorder_keeps_vm_states_by_path_and_occurrence() {
 }
 
 #[test]
+fn failed_reload_keeps_the_live_module_and_its_state() {
+    let scripts = Scripts::new("failed_reload");
+    scripts.write(
+        "reload.lua",
+        r#"
+        function start(ctx) state_set(ctx, 'count', 0) end
+        function update(ctx)
+            local n = state_get(ctx, 'count') + 1
+            state_set(ctx, 'count', n)
+            set_pos(ctx, n, 0, 0)
+        end
+        "#,
+    );
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        UiElement::default(),
+        mounts(&["reload.lua"]),
+    ));
+    let mut runtime = scripts.runtime();
+    step(&mut runtime, &mut world);
+    assert_eq!(world.get::<Transform>(entity).unwrap().position[0], 1.0);
+
+    scripts.write(
+        "reload.lua",
+        r#"
+        state_set(nil, 'count', 999)
+        ui_set_text(nil, self_id(nil), 'rejected')
+        _G.update = function(ctx) set_pos(ctx, 99, 0, 0) end
+        error('fixture reload failure')
+        "#,
+    );
+    let error = runtime.reload_all().unwrap_err();
+    assert!(
+        error.contains("reload.lua") && error.contains("fixture reload failure"),
+        "{error}"
+    );
+    step(&mut runtime, &mut world);
+    assert_eq!(world.get::<Transform>(entity).unwrap().position[0], 2.0);
+    assert!(world.get::<UiElement>(entity).unwrap().text.is_empty());
+}
+
+#[test]
+fn successful_reload_removes_old_hooks_and_keeps_persistent_state() {
+    let scripts = Scripts::new("remove_hooks");
+    scripts.write(
+        "reload.lua",
+        r#"
+        function start(ctx) state_set(ctx, 'count', 3) end
+        function update(ctx) set_pos(ctx, state_get(ctx, 'count'), 0, 0) end
+        function on_anim_event(ctx) ui_set_text(ctx, self_id(ctx), 'old hook') end
+        "#,
+    );
+    let mut world = World::new();
+    let entity = world.spawn((
+        Transform::default(),
+        UiElement::default(),
+        mounts(&["reload.lua"]),
+    ));
+    let id = world.entity(entity).unwrap();
+    let mut runtime = scripts.runtime();
+    step(&mut runtime, &mut world);
+    assert_eq!(world.get::<Transform>(entity).unwrap().position[0], 3.0);
+
+    scripts.write(
+        "reload.lua",
+        r#"
+        local make = assert(load('return function(ctx) set_pos(ctx, state_get(ctx, "count") + 1, 0, 0) end'))
+        function start(ctx) state_set(ctx, 'count', 100) end
+        fixed_update = make()
+        "#,
+    );
+    runtime.reload_all().unwrap();
+    world.push_animation_event(FiredAnimEvent {
+        entity: id,
+        name: "fixture".into(),
+    });
+    step(&mut runtime, &mut world);
+    assert_eq!(world.get::<Transform>(entity).unwrap().position[0], 4.0);
+    assert!(world.get::<UiElement>(entity).unwrap().text.is_empty());
+}
+
+#[test]
+fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() {
+    let scripts = Scripts::new("reload_mounts_together");
+    for label in ["a", "b"] {
+        scripts.write(
+            &format!("{label}.lua"),
+            &format!(
+                "function update(ctx)\n\
+                 local id = self_id(ctx)\n\
+                 ui_set_text(ctx, id, table.concat({{ui_text(ctx, id), '{label}'}}))\n\
+                 end"
+            ),
+        );
+    }
+    let mut world = World::new();
+    let entity = world.spawn((UiElement::default(), mounts(&["a.lua", "b.lua"])));
+    let mut runtime = scripts.runtime();
+    step(&mut runtime, &mut world);
+    assert_eq!(world.get::<UiElement>(entity).unwrap().text, "ab");
+
+    scripts.write(
+        "a.lua",
+        r#"
+        ui_spawn_label(nil, 'candidate', 0, 0, 20)
+        ui_set_text(nil, self_id(nil), 'candidate text')
+        set_bus_volume(nil, 'bgm', 0.125)
+        play_sound(nil, 'candidate.wav', 1, 1)
+        table.concat = function() return 'candidate library' end
+        function update(ctx)
+            local id = self_id(ctx)
+            ui_set_text(ctx, id, ui_text(ctx, id) .. 'A')
+        end
+        "#,
+    );
+    scripts.write(
+        "b.lua",
+        "function update(ctx) end; error('last mount rejected')",
+    );
+
+    let assert_no_audio_effect = |runtime: &mut ScriptRuntime| {
+        runtime.finish_audio_frame(xgc_world::AudioMixer::default(), |mix, _, commands| {
+            assert_eq!(mix.bgm, 1.0);
+            assert_eq!(commands.len(), 0);
+        });
+    };
+    let error = runtime.reload_all().unwrap_err();
+    assert!(error.contains("b.lua") && error.contains("last mount rejected"));
+    assert_no_audio_effect(&mut runtime);
+    step(&mut runtime, &mut world);
+    assert_eq!(world.get::<UiElement>(entity).unwrap().text, "abab");
+    assert_eq!(world.len(), 1);
+
+    scripts.write(
+        "b.lua",
+        r#"
+        function update(ctx)
+            local id = self_id(ctx)
+            ui_set_text(ctx, id, ui_text(ctx, id) .. 'B')
+        end
+        "#,
+    );
+    runtime.reload_all().unwrap();
+    assert_no_audio_effect(&mut runtime);
+    step(&mut runtime, &mut world);
+    assert_eq!(world.get::<UiElement>(entity).unwrap().text, "ababAB");
+    assert_eq!(world.len(), 1);
+}
+
+#[test]
 fn failed_mount_does_not_overwrite_the_other_mounts_commands() {
     let scripts = Scripts::new("failed_mount");
     scripts.write("first.lua", "ui_set_text(nil, self_id(nil), 'ready')");

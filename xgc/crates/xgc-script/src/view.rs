@@ -12,7 +12,8 @@ use xgc_world::{
     Transform, UiElement, UiInteraction, Value, Velocity, World,
 };
 
-use crate::audio_api::ScriptAudio;
+use crate::audio_api::{AudioCheckpoint, ScriptAudio};
+use crate::legacy::View;
 
 /// `ui.element`（comp `0x0601`）的只读快照：布局 setter 需要「当前尺寸 / 位置」
 /// 做增量修改，getter 需要文本 / 可见 / 可交互。
@@ -111,6 +112,13 @@ pub struct ActionState {
     pub released: bool,
 }
 
+#[derive(Clone, Debug)]
+struct MountCheckpoint {
+    spawn_cursor: u64,
+    audio: AudioCheckpoint,
+    entities: Vec<EntityView>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ScriptView {
     pub delta: f32,
@@ -132,9 +140,42 @@ pub struct ScriptView {
     /// 直接改运行时元素，天然可见）。命令在帧末才 apply，所以这里补一份快照，
     /// 结算后下一帧由 `refresh_view` 从世界重建、清空。
     pub pending_spawns: BTreeMap<u64, EntityView>,
+    mount_checkpoint: Option<MountCheckpoint>,
 }
 
 impl ScriptView {
+    /// 顶层初始化可能写帧内视图，只记录它碰过的行，避免每次初装都复制整张表。
+    pub(crate) fn initialize<T>(
+        view: &View,
+        keep_effects: bool,
+        load: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        {
+            let mut view = view.borrow_mut();
+            debug_assert!(view.mount_checkpoint.is_none());
+            view.mount_checkpoint = Some(MountCheckpoint {
+                spawn_cursor: view.spawn_cursor,
+                audio: view.audio.checkpoint(),
+                entities: Vec::new(),
+            });
+        }
+        let result = load();
+        let mut view = view.borrow_mut();
+        let checkpoint = view.mount_checkpoint.take().expect("初始化已建立检查点");
+        if !keep_effects || result.is_err() {
+            for saved in checkpoint.entities {
+                if let Some(row) = view.entity_mut(saved.id) {
+                    *row = saved;
+                }
+            }
+            view.spawn_cursor = checkpoint.spawn_cursor;
+            view.pending_spawns
+                .retain(|id, _| *id < checkpoint.spawn_cursor);
+            view.audio.restore(checkpoint.audio);
+        }
+        result
+    }
+
     pub(crate) fn action_mut(&mut self, name: &str) -> &mut ActionState {
         if !self.actions.contains_key(name) {
             self.actions.insert(name.to_owned(), ActionState::default());
@@ -150,10 +191,17 @@ impl ScriptView {
     }
 
     pub(crate) fn entity_mut(&mut self, id: u64) -> Option<&mut EntityView> {
-        self.entities
+        let row = self
+            .entities
             .iter_mut()
             .find(|entity| entity.id == id)
-            .or_else(|| self.pending_spawns.get_mut(&id))
+            .or_else(|| self.pending_spawns.get_mut(&id))?;
+        if let Some(checkpoint) = &mut self.mount_checkpoint {
+            if !checkpoint.entities.iter().any(|saved| saved.id == id) {
+                checkpoint.entities.push(row.clone());
+            }
+        }
+        Some(row)
     }
 
     pub(crate) fn stage_animation_field(

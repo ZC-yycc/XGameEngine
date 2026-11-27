@@ -31,7 +31,12 @@ pub use crate::view::{EntityView, ScriptView};
 pub(crate) type Commands = Rc<RefCell<Vec<Command>>>;
 pub(crate) type View = Rc<RefCell<ScriptView>>;
 
-pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Result<(), String> {
+pub(crate) fn register(
+    lua: &Lua,
+    commands: &Commands,
+    view: &View,
+    self_id: u64,
+) -> Result<Rc<RefCell<Table>>, String> {
     let globals = lua.globals();
     let delta_view = Rc::clone(view);
     globals
@@ -371,36 +376,40 @@ pub fn register(lua: &Lua, commands: &Commands, view: &View, self_id: u64) -> Re
             .map_err(|err| err.to_string())?;
     }
 
-    register_script_state(lua, view, self_id)?;
+    let state = register_script_state(lua, view, self_id)?;
     crate::character_api::register(lua, commands, view, self_id)?;
-    Ok(())
+    Ok(state)
 }
 
-/// 脚本私有状态表：`state_get` / `state_set` / `state_get_or`。
-///
-/// 状态挂在每个脚本各自的 Lua 环境里（旧端也是每脚本一份），重载脚本会重置。
-fn register_script_state(lua: &Lua, view: &View, self_id: u64) -> Result<(), String> {
+/// 每个挂载持有同一份持久状态，候选模块的顶层初始化操作临时表。
+fn register_script_state(
+    lua: &Lua,
+    view: &View,
+    self_id: u64,
+) -> Result<Rc<RefCell<Table>>, String> {
     let globals = lua.globals();
-    let state = lua.create_table().map_err(|err| err.to_string())?;
+    let state = Rc::new(RefCell::new(
+        lua.create_table().map_err(|err| err.to_string())?,
+    ));
 
-    let get_state = state.clone();
+    let get_state = Rc::clone(&state);
     globals
         .set(
             "state_get",
             lua.create_function(move |_, (_ctx, key): (mlua::Value, String)| {
-                get_state.get::<mlua::Value>(key)
+                get_state.borrow().raw_get::<mlua::Value>(key)
             })
             .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
 
-    let get_or_state = state.clone();
+    let get_or_state = Rc::clone(&state);
     globals
         .set(
             "state_get_or",
             lua.create_function(
                 move |_, (_ctx, key, default): (mlua::Value, String, mlua::Value)| {
-                    let value = get_or_state.get::<mlua::Value>(key)?;
+                    let value = get_or_state.borrow().raw_get::<mlua::Value>(key)?;
                     Ok(match value {
                         mlua::Value::Nil => default,
                         value => value,
@@ -411,13 +420,13 @@ fn register_script_state(lua: &Lua, view: &View, self_id: u64) -> Result<(), Str
         )
         .map_err(|err| err.to_string())?;
 
-    let set_state = state;
+    let set_state = Rc::clone(&state);
     globals
         .set(
             "state_set",
             lua.create_function(
                 move |_, (_ctx, key, value): (mlua::Value, String, mlua::Value)| {
-                    set_state.set(key, value)
+                    set_state.borrow().raw_set(key, value)
                 },
             )
             .map_err(|err| err.to_string())?,
@@ -469,7 +478,7 @@ fn register_script_state(lua: &Lua, view: &View, self_id: u64) -> Result<(), Str
             .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
-    Ok(())
+    Ok(state)
 }
 
 pub(crate) fn vector_table(lua: &Lua, value: [f32; 3]) -> mlua::Result<Table> {

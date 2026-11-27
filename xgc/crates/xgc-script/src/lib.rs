@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use mlua::{
-    ChunkMode, FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib,
-    Value as LuaValue,
+    ChunkMode, FromLua, FromLuaMulti, Function, IntoLua, IntoLuaMulti, Lua, LuaOptions, StdLib,
+    Table, Value as LuaValue,
 };
 use xgc_base::EntityId;
 use xgc_world::{builtin_registry, Command, Transform, World};
@@ -21,6 +21,7 @@ mod component_data;
 mod legacy;
 mod lifecycle;
 mod lua_value;
+mod module;
 mod runtime;
 mod sandbox;
 mod ui_api;
@@ -39,6 +40,9 @@ pub struct LuaHost {
     lua: Lua,
     world: Option<Rc<RefCell<World>>>,
     scripts: RefCell<BTreeMap<String, String>>,
+    environment: RefCell<Option<Table>>,
+    load_factory: Function,
+    state: Option<Rc<RefCell<Table>>>,
     instruction_limit: usize,
     memory_limit: Cell<usize>,
     started: Cell<bool>,
@@ -52,12 +56,16 @@ impl LuaHost {
         let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
         let lua = Lua::new_with(libs, LuaOptions::default())
             .map_err(|err| format!("创建 Lua 运行时失败：{err}"))?;
-        sandbox::configure(&lua).map_err(|err| format!("配置 Lua 安全标准库失败：{err}"))?;
+        let load_factory =
+            sandbox::configure(&lua).map_err(|err| format!("配置 Lua 安全标准库失败：{err}"))?;
         budget::install(&lua).map_err(|err| format!("设置 Lua 指令预算失败：{err}"))?;
         let host = Self {
             lua,
             world: None,
             scripts: RefCell::new(BTreeMap::new()),
+            environment: RefCell::new(None),
+            load_factory,
+            state: None,
             instruction_limit: budget::DEFAULT_INSTRUCTION_LIMIT,
             memory_limit: Cell::new(0),
             started: Cell::new(false),
@@ -86,7 +94,7 @@ impl LuaHost {
     ) -> Result<Self, String> {
         let mut host = Self::new()?;
         host.register_commands(&commands, Some(Rc::clone(&view)))?;
-        legacy::register(&host.lua, &commands, &view, self_id)?;
+        host.state = Some(legacy::register(&host.lua, &commands, &view, self_id)?);
         host.commands = Some(commands);
         host.self_id = self_id;
         Ok(host)
@@ -231,35 +239,12 @@ impl LuaHost {
         }
     }
 
-    /// 加载脚本：执行并登记源码，供 `reload` 使用。
-    pub fn load_script(&self, name: &str, source: &str) -> Result<(), String> {
-        self.scripts
-            .borrow_mut()
-            .insert(name.to_string(), source.to_string());
-        self.run(name, source)
-    }
-
-    /// 热重载：重新执行已登记脚本。
-    pub fn reload(&self, name: &str) -> Result<(), String> {
-        let source = self
-            .scripts
-            .borrow()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("没有登记脚本 {name}"))?;
-        self.run(name, &source)
-    }
-
-    pub fn script_names(&self) -> Vec<String> {
-        self.scripts.borrow().keys().cloned().collect()
-    }
-
     /// 调用生命周期钩子；脚本没有该函数时返回 false。
     pub fn call_hook(&self, name: &str, dt: f32) -> Result<bool, String> {
         self.with_budget(
             || format!("Lua 钩子 {name} 失败"),
             || {
-                let LuaValue::Function(function) = self.lua.globals().get::<LuaValue>(name)? else {
+                let LuaValue::Function(function) = self.environment().get::<LuaValue>(name)? else {
                     return Ok(false);
                 };
                 if name == "on_update" {
@@ -482,14 +467,23 @@ impl LuaHost {
     pub fn run(&self, name: &str, source: &str) -> Result<(), String> {
         self.with_budget(
             || format!("脚本 {name} 执行失败"),
-            || compile::compile_text(&self.lua, name, source)?.call::<()>(()),
+            || {
+                compile::compile_text(&self.lua, name, source, Some(self.environment()))?
+                    .call::<()>(())
+            },
         )
     }
 
     pub fn eval<T: FromLuaMulti>(&self, source: &str) -> Result<T, String> {
         self.with_budget(
             || "Lua 求值失败".into(),
-            || self.lua.load(source).set_mode(ChunkMode::Text).eval(),
+            || {
+                self.lua
+                    .load(source)
+                    .set_mode(ChunkMode::Text)
+                    .set_environment(self.environment())
+                    .eval()
+            },
         )
     }
 
@@ -504,14 +498,14 @@ impl LuaHost {
     ) -> Result<T, String> {
         self.with_budget(
             || format!("Lua 函数 {name} 调用失败"),
-            || self.lua.globals().get::<mlua::Function>(name)?.call(args),
+            || self.environment().get::<Function>(name)?.call(args),
         )
     }
 
     pub fn set_global(&self, name: &str, value: impl IntoLua) -> Result<(), String> {
         self.with_budget(
             || format!("写入 Lua 全局 {name} 失败"),
-            || self.lua.globals().set(name, value),
+            || self.environment().set(name, value),
         )
     }
 
@@ -520,7 +514,7 @@ impl LuaHost {
             || format!("读取 Lua 全局 {name} 失败"),
             || {
                 Ok(matches!(
-                    self.lua.globals().get::<LuaValue>(name)?,
+                    self.environment().get::<LuaValue>(name)?,
                     LuaValue::Nil
                 ))
             },

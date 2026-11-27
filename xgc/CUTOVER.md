@@ -100,6 +100,8 @@ Lua VM 默认使用 128 MiB 内存上限。每次钩子调用有约 20 万条指
 
 Lua 的 `print`、`warn`、`log(ctx, ...)` 与 `xgc.log` 统一写入 stderr。CLI 的逐帧轨迹和 Agent 的 stdio 响应可直接按各自协议解析。[日志与轨迹回归](crates/xgc-cli/tests/trace.rs)
 
+脚本重载先在每个挂载的 VM 内初始化候选环境。全部候选通过后才切换活动代码，保留 `state_*` 状态并清除新版已删掉的钩子。候选的实体、UI、音频写入在初始化后撤回。回归覆盖同实体多个挂载的整批替换、语法或顶层错误后继续调用旧代码，以及下一步读取原持久状态。showcase 的 151 个检查点和角色场景第 120 帧完整快照保持逐字节一致。[重载回归](crates/xgc-script/tests/mounts.rs)
+
 ## 脚本音频与混音
 
 `play_sound`、带位置和总线的播放、停止、监听者及音量控制通过共享宿主在固定步结束时结算。片段按项目搜索顺序或 GUID 解析。同一会话内复用解码后的 WAV，现有声部随总线音量和监听位置更新。48 kHz 单声道 PCM 使用调用方缓冲，按源采样率及 pitch 采样。测试核对了命令先后、现有声部的音量变化、跨块循环及采样值。44.1 kHz 的 `Beep.wav` 经 CLI 同采样率混音，前后 WAV 逐字节一致。[宿主混音回归](crates/xgc-host/tests/audio.rs) · [采样回归](crates/xgc-sim/tests/audio.rs)

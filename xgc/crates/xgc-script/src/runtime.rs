@@ -172,7 +172,7 @@ impl ScriptRuntime {
             {
                 return true;
             }
-            // 热重载后尚未结算的旧命令与挂载一起失效；现在只收销毁钩子的写入。
+            // 挂载已退出，现在只收销毁钩子的写入。
             scripts.commands.borrow_mut().clear();
             scripts.dispatch(entity, LuaHost::destroy, error);
             if world.key(entity).is_none() {
@@ -286,8 +286,9 @@ impl ScriptRuntime {
         view.audio.commands.clear();
     }
 
-    /// 重新读取磁盘并执行所有已加载脚本；场景脚本热重载入口。
+    /// 重新读取所有挂载。候选模块均通过初始化后再替换活动代码，运行期状态留在原 VM。
     pub fn reload_all(&mut self) -> Result<(), String> {
+        let mut modules = Vec::new();
         for (&entity, scripts) in &self.entries {
             for mount in &scripts.mounts {
                 let Some(vm) = &mount.vm else {
@@ -296,10 +297,16 @@ impl ScriptRuntime {
                 let source = std::fs::read_to_string(&vm.source).map_err(|err| {
                     mount.error(entity, format!("读取 {} 失败：{err}", vm.source.display()))
                 })?;
-                vm.host
-                    .load_script(&mount.path, &source)
-                    .map_err(|err| mount.error(entity, err))?;
+                // 初始化用来构造模块；显式重载不能在步与步之间写实体或播放音频。
+                let module = initialize(&self.view, &scripts.commands, false, || {
+                    vm.host.prepare_module(&mount.path, &source)
+                })
+                .map_err(|err| mount.error(entity, err))?;
+                modules.push((&vm.host, module));
             }
+        }
+        for (host, module) in modules {
+            host.commit_module(module);
         }
         Ok(())
     }
@@ -383,16 +390,26 @@ fn load_mount(
     let source = std::fs::read_to_string(&resolved)
         .map_err(|err| format!("读取 {} 失败：{err}", resolved.display()))?;
     let host = LuaHost::with_commands_and_view(Rc::clone(commands), Rc::clone(view), entity.raw())?;
-    // 顶层代码可能改已有的 UI 写入。加载失败仍须保留其他挂载已经排队的命令。
-    let previous = commands.borrow().clone();
-    if let Err(err) = host.load_script(path, &source) {
-        *commands.borrow_mut() = previous;
-        return Err(err);
-    }
+    initialize(view, commands, true, || host.load_script(path, &source))?;
     Ok(MountedVm {
         host,
         source: resolved,
     })
+}
+
+fn initialize<T>(
+    view: &Rc<RefCell<ScriptView>>,
+    commands: &Commands,
+    keep_effects: bool,
+    load: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    // UI setter 可能改已有的待结算命令，失败后必须把先前写入还给原挂载。
+    let previous = commands.borrow().clone();
+    let result = ScriptView::initialize(view, keep_effects, load);
+    if !keep_effects || result.is_err() {
+        *commands.borrow_mut() = previous;
+    }
+    result
 }
 
 fn note_error(frame_error: &mut Option<String>, err: String) {

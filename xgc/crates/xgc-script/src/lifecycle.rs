@@ -13,7 +13,7 @@ impl LuaHost {
         self.with_budget(
             || format!("Lua 钩子 {name} 失败"),
             || {
-                let LuaValue::Function(function) = self.lua.globals().get::<LuaValue>(name)? else {
+                let LuaValue::Function(function) = self.environment().get::<LuaValue>(name)? else {
                     return Ok(false);
                 };
                 let ctx = self.lua.create_table()?;

@@ -16,7 +16,31 @@ pub struct ScriptAudio {
     buses: [Option<f32>; AudioBus::ALL.len()],
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AudioCheckpoint {
+    commands: usize,
+    listener: Option<ListenerPose>,
+    master: Option<f32>,
+    buses: [Option<f32>; AudioBus::ALL.len()],
+}
+
 impl ScriptAudio {
+    pub(crate) fn checkpoint(&self) -> AudioCheckpoint {
+        AudioCheckpoint {
+            commands: self.commands.len(),
+            listener: self.listener,
+            master: self.master,
+            buses: self.buses,
+        }
+    }
+
+    pub(crate) fn restore(&mut self, saved: AudioCheckpoint) {
+        self.commands.truncate(saved.commands);
+        self.listener = saved.listener;
+        self.master = saved.master;
+        self.buses = saved.buses;
+    }
+
     fn bus_volume(&self, bus: AudioBus) -> f32 {
         self.buses[bus.index()].unwrap_or_else(|| self.authored_mix.bus_volume(bus))
     }
