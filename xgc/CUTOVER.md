@@ -18,6 +18,19 @@
 | 性能基准 + 热路径分配门禁 | **通过当前预算** | [分配回归](crates/xgc-sim/tests/steady_state.rs) 的 210 实体场景预热后测 60 帧。借用字段计算状态哈希使分配从 14,598 次 / 311,344 字节降到 1,398 次 / 191,344 字节，复用分批下标和 AABB 刚体缓冲后降到 438 次 / 45,424 字节，当前门禁为 720 次。257 刚体持续接触场景的混合串行批从 660 次分配降到零。Rapier 建体与运动学同步复用父链缓冲，八层移动父链每 60 帧从 300 次 / 34,560 字节降到 180 次 / 5,760 字节，每帧射线核对碰撞体位姿。名字与刚体场景连续 60 次 `state_hash` 零分配且哈希仍为 `cda5ee4b28a9f49e`，1 万实体复用槽位后的乱序哈希也通过零分配门禁。1,026 个 HUD 元素的父子布局预热后测 60 帧，从 2,580 次 / 35,399,280 字节降到零，同机三次 Release 从 32.63–33.58 ms 降至 7.50–7.71 ms，每帧核对锚点、裁剪和可见性。[嵌套字段回归](crates/xgc-sim/tests/hash_allocation.rs) 各用 128 个实体连续计算 60 次哈希，`animation.layers`、`animation.state`、`render.lod` 的分配从 1,021,440、560,640、99,840 次分别降到零，三个原哈希逐位一致。同机 Release 耗时分别从 92.32 降至 15.43 ms、42.05 降至 4.78 ms、7.39 降至 1.31 ms。整帧仍需零分配验收。CI 的 `test` job 另记录 Release 吞吐。 |
 | 推送 / CI | **迁移与检查已推送** | 基线重生成、项目迁移与原生检查已合入远端 `master`（`35befa9`、`78853be`、`c1dbd6b`、`d8b5828`）。[XGC CI 工作流](../.github/workflows/xgc.yml) 在 push / pull_request 上跑门禁与 CPU 测试，GPU 集成测试在带显卡的验收机执行。历史成功记录见运行 `45245793893`。 |
 
+## M0 基础计量
+
+在 i7-10700、Windows 10 19045、平衡电源方案和 rustc 1.98.1 MSVC 上运行单线程 Release。三个计时用例各预热两轮，再各测九次。基础固定步预热八帧，再测九组 60 帧。预算取自[框架设计 §13.3](../Docs/引擎框架设计.md#133-微基准)。
+
+| 项目 | 中位数（最小–最大） | 预算 |
+|---|---:|---|
+| [百万字段读](crates/xgc-world/tests/m0_bench.rs)，逐行累加 `Transform.position[0]` | 1.9001 ms（1.8678–2.0918） | ≤ 1 ms，未达标 |
+| [十万实体层级传播](crates/xgc-sim/tests/m0_bench.rs)，深度 16，每次移动根并核对全量结果 | 55.6609 ms（50.9258–64.4275） | ≤ 2 ms，未达标 |
+| [全量 schema 序列化](crates/xgc-xtask/tests/m0_bench.rs)，30 个类型、80,271 字节 | 0.4032 ms（0.3218–0.4597） | ≤ 50 ms，通过 |
+| [基础固定步](crates/xgc-sim/tests/steady_state.rs)，256 实体且末端子节点的 x 到达 549 | 九组均为 0 次 / 0 字节 | 预热后零分配，通过 |
+
+在 `xgc/` 运行 `cargo test --locked --offline --release -p xgc-world -p xgc-sim -p xgc-xtask --test m0_bench -- --ignored --nocapture --test-threads=1`。基础循环用 `cargo test --locked --offline --release -p xgc-sim --test steady_state -- foundation_world_loop_has_no_allocations --exact --nocapture --test-threads=1`。计时先用 `--no-run` 完成构建，再在独占窗口串行跑测试产物。
+
 ## S2 物理场基线
 
 用 i7-10700、32 GiB RAM、Windows 10、Rust 1.98.1 MSVC 测量 Release ThinLTO 的默认单线程固定步。每档预热 18 步。组场与首步另计，状态哈希在计时外计算。[基准代码](crates/xgc-sim/tests/physics_yard.rs)

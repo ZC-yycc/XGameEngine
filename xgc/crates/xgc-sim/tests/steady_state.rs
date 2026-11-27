@@ -85,6 +85,79 @@ fn steady_state_frames_stay_within_the_allocation_budget() {
 }
 
 #[test]
+fn foundation_world_loop_has_no_allocations() {
+    use xgc_world::{GlobalTransform, Parent};
+
+    const ENTITIES: usize = 256;
+    const WARMUP: u64 = 8;
+    const FRAMES: u64 = 60;
+    const SAMPLES: usize = 9;
+    let mut world = World::new();
+    let root = world.spawn((
+        Transform::default(),
+        Velocity {
+            linear: [60.0, 0.0, 0.0],
+        },
+        GlobalTransform::default(),
+    ));
+    let parent = world.entity(root).unwrap();
+    let mut last_child = root;
+    for _ in 1..ENTITIES {
+        last_child = world.spawn((
+            Transform {
+                position: [1.0, 0.0, 0.0],
+                ..Transform::default()
+            },
+            Parent { entity: parent },
+            GlobalTransform::default(),
+        ));
+    }
+    let mut simulation = Simulation::new(world);
+    assert_eq!(simulation.parallel_threads(), 1);
+    assert_eq!(simulation.world().len(), ENTITIES);
+    // 宿主和固定步共用 advance_with；基础循环不累计回放记录。
+    let mut step = |expected_frame| {
+        let frame = simulation.advance_with(Vec::new(), |_| {}).unwrap();
+        assert_eq!(frame, expected_frame);
+    };
+    for frame in 0..WARMUP {
+        step(frame);
+    }
+
+    let mut samples = [(0, 0); SAMPLES];
+    for (sample, counts) in samples.iter_mut().enumerate() {
+        reset_counter();
+        let first_frame = WARMUP + (sample as u64) * FRAMES;
+        for frame in first_frame..(first_frame + FRAMES) {
+            step(frame);
+        }
+        *counts = snapshot().expect("量测线程的计数器");
+    }
+    let frames = WARMUP + (SAMPLES as u64) * FRAMES;
+    let world = simulation.world();
+    let child = world.get::<GlobalTransform>(last_child).unwrap();
+    assert_eq!(world.len(), ENTITIES);
+    assert_eq!(child.position, [frames as f32 + 1.0, 0.0, 0.0]);
+    assert!(simulation.trace().frames.is_empty());
+
+    let mut calls = samples.map(|(calls, _)| calls);
+    let mut bytes = samples.map(|(_, bytes)| bytes);
+    calls.sort_unstable();
+    bytes.sort_unstable();
+    eprintln!(
+        "M0 foundation_world entities={ENTITIES} warmup={WARMUP} frames_per_sample={FRAMES} child_x={} calls_median={} calls_range={}..{} bytes_median={} bytes_range={}..{} samples={samples:?}",
+        child.position[0],
+        calls[SAMPLES / 2],
+        calls[0],
+        calls[SAMPLES - 1],
+        bytes[SAMPLES / 2],
+        bytes[0],
+        bytes[SAMPLES - 1],
+    );
+    assert_eq!(samples, [(0, 0); SAMPLES], "基础世界预热后应零分配");
+}
+
+#[test]
 fn mixed_serial_batch_and_aabb_reuse_working_storage() {
     let mut world = World::new();
     // 给排序施加足够的行数压力；静态体之间不会产生接触。
