@@ -12,8 +12,8 @@ use xgc_base::{EntityId, EntityKey};
 use xgc_world::{CharacterController, Transform, Velocity, World};
 
 use super::bodies::rotation;
+use super::contacts::emit_sensor_contacts;
 use super::RapierWorld;
-use crate::aabb::emit_contacts;
 use crate::character_kcc;
 
 /// 一个角色实体的运行时托管：刚体 + 胶囊 + 本帧要用的控制器。
@@ -151,7 +151,7 @@ impl RapierWorld {
         if dt <= 0.0 {
             return;
         }
-        // 角色-传感器接触与 AABB 的接触表分开：角色没有 `physics.body`，AABB 根本看不到它。
+        // 角色的传感器边沿取角色移动后的姿态，保留独立的有序接触对。
         // 复用上一帧的缓冲，避免每步分配；接触对按 ID 排序后交给同一份 diff。
         let mut contacts = std::mem::take(&mut self.sensor_current);
         contacts.clear();
@@ -410,7 +410,7 @@ impl RapierWorld {
         }
         contacts.sort_unstable();
         contacts.dedup();
-        emit_contacts(world, &self.sensor_previous, &contacts);
+        emit_sensor_contacts(world, &self.sensor_previous, &contacts);
         std::mem::swap(&mut self.sensor_previous, &mut contacts);
         self.sensor_current = contacts;
     }

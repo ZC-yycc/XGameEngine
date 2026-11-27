@@ -78,7 +78,6 @@ fn describe_lists_protocol_components_and_world_state() {
             "character_jump",
             "velocity",
             "ground",
-            "aabb",
             "rapier",
             "ui_layout",
             "ui_interaction",

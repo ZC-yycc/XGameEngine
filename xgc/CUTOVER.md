@@ -64,9 +64,11 @@
 
 中档尚未达到 6.7 ms 的 CPU 预算。单独跑中档的 AABB 与 Rapier 各 8 步，中位耗时分别为 1,597.062 ms 和 94.529 ms。中高档短样本的 p99 取最大值。复测低中档的分配计数和哈希一致，耗时随机器负载波动。GPU、磁盘加载与峰值内存仍待测。[S2 验收口径](../Docs/引擎框架设计.md#131-旗舰基准场景xg-bench)
 
-AABB 加入空间树后，仍按实体 ID 求解，分离改变位置时刷新后续候选。碰撞密集时每个左体最多查询四次空间树，随后按 ID 扫描余下实体。旧版与新版的 1,570 条位置、速度位模式和有向事件逐字节相同，showcase 的 151 个检查点一致。[候选对回归](crates/xgc-sim/tests/aabb_candidates.rs)
+历史上，AABB 空间树让低档 120 步的 p50 / p95 / p99 从 7.891 / 11.059 / 12.652 ms 降至 4.631 / 6.817 / 6.990 ms，中档 8 步从 577.655 / 709.270 / 709.270 ms 降至 63.963 / 76.487 / 76.487 ms。中档单独运行 AABB 的 p50 从 518.138 ms 降至 11.191 ms，两版预热后均为零分配。相邻隔离测量的 Rapier p50 为 30.258 ms。1,570 条位置、速度位模式和有向事件在两份实现中逐字节相同。
 
-同机相邻运行的 Release 对照中，低档 120 步的 p50 / p95 / p99 从 7.891 / 11.059 / 12.652 ms 降至 4.631 / 6.817 / 6.990 ms，中档 8 步从 577.655 / 709.270 / 709.270 ms 降至 63.963 / 76.487 / 76.487 ms。中档单独运行 AABB 的 p50 从 518.138 ms 降至 11.191 ms，预热后两版均为零分配。整步中档仍有 192 次 / 2,096,640 B 分配。Rapier 单独运行的 p50 为 30.258 ms，中档仍高于 CPU 预算。
+普通刚体与坡面的接触边沿现由 Rapier 固定步发布，先按持久 ID 对排序，每个边沿发给双方。同一对保留后端事件顺序。持续接触的碰撞体换代合并结构性进出边沿。角色传感器继续用角色的扫掠查询。回归覆盖 AABB 盒角假接触、真实坡面接触、双向层掩码、换代、删除及 1 / 4 线程事件顺序。真实 Lua 回调在第 1 步接到进入、第 2 步接到退出，五步的 X 位置为 `0, 2, 2, 2, 2`。[窄相回归](crates/xgc-sim/tests/rapier_contacts.rs) · [Lua 回归](crates/xgc-host/tests/physics_scripts.rs)
+
+用同一中档负载交替跑两份隔离 Release 产物，各六轮。每轮预热 18 步、采样 8 步。默认固定步的 p50 / p95 / p99 中位值从 39.752 / 43.924 / 43.924 ms 降至 30.269 / 32.100 / 32.100 ms，仍高于 6.7 ms。同期隔离 Rapier p50 从 28.707 ms 到 27.771 ms，轮间范围重叠。全部轮次均为每 8 步 192 次 / 2,096,640 B 分配，初始、预热和末态哈希分别为 `7918e27c891574d5`、`fbcdda63e91574d5`、`3fc9b5c7e91574d5`。
 
 在 `xgc/` 运行 `cargo test --locked --offline -j 2 --release -p xgc-sim --test physics_yard -- --ignored --nocapture --test-threads=1`。可按测试名选择档位，或用 `XGC_S2_SAMPLES` 指定样本数。
 
@@ -215,7 +217,7 @@ HUD 图片按项目相对路径或 GUID 从同一资产目录读取。GPU 回归
 
 ## 项目碰撞矩阵
 
-旧项目的层名和掩码覆盖迁到 `project.xgc`，并纳入 cooked 清单签名。缺省全通，显式零掩码拒绝接触。AABB、Rapier 刚体和角色地面、移动及触发查询采用双向过滤。运行时改层只更新已建碰撞体的分组，保留句柄、速度和求解状态。[清单回归](crates/xgc-migrate/tests/project_migrate/layers.rs) · [物理回归](crates/xgc-sim/tests/collision_layers.rs)
+旧项目的层名和掩码覆盖迁到 `project.xgc`，并纳入 cooked 清单签名。缺省全通，显式零掩码拒绝接触。Rapier 刚体和角色地面、移动及触发查询采用双向过滤。运行时改层只更新已建碰撞体的分组，保留句柄、速度和求解状态。[清单回归](crates/xgc-migrate/tests/project_migrate/layers.rs) · [物理回归](crates/xgc-sim/tests/collision_layers.rs)
 
 在同一双实体场景中，默认掩码让球在第 60 步停在平台上约 3 m。只将平台所在的第 31 层掩码改为零后，球落到 0 m 以下。原生 CLI、cooked CLI 和 Agent 项目预览的终态哈希在两种设置下分别一致。只改 cooked 清单掩码会触发签名拒绝。编辑器 Play 单步得到同样的穿过行为，Stop 后原场景和文件字节保持一致。角色回归另核对了阻挡层同时排除地面和触发器。[跨入口回归](crates/xgc-cli/tests/collision_layers.rs) · [Play 回归](crates/xgc-editor/tests/project_play.rs)
 

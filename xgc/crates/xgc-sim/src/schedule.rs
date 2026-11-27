@@ -7,10 +7,10 @@
 use xgc_world::{ComponentId, World, WriteSet};
 
 use crate::{
-    AabbCollisionSystem, AnimationLayerSystem, AnimationPlaybackSystem, AnimationStateSystem,
-    AnimatorSystem, AudioMixerSystem, CharacterJumpSystem, GroundCollisionSystem, HierarchySystem,
-    PhysicsSystem, RapierPhysicsSystem, SkeletonPoseSystem, UiFocusSystem, UiInteractionSystem,
-    UiLayoutSystem, VelocitySystem,
+    AnimationLayerSystem, AnimationPlaybackSystem, AnimationStateSystem, AnimatorSystem,
+    AudioMixerSystem, CharacterJumpSystem, GroundCollisionSystem, HierarchySystem, PhysicsSystem,
+    RapierPhysicsSystem, SkeletonPoseSystem, UiFocusSystem, UiInteractionSystem, UiLayoutSystem,
+    VelocitySystem,
 };
 
 /// 默认系统名；Agent 能力清单直接复用，避免手写两份。
@@ -140,12 +140,8 @@ impl Schedule {
         schedule.add(CharacterJumpSystem);
         schedule.add(VelocitySystem::new(threads));
         schedule.add(GroundCollisionSystem::default());
-        schedule.add(AabbCollisionSystem::default());
-        // 刚体走与旧引擎相同的 rapier 求解器（角动量 / 接触力矩 / 堆叠才与旧图可比）。
-        // 放在这里：上面的简化系统先跑，对 rapier 接管的 `physics.body` 实体的
-        // Transform 改动会被这一步整帧覆盖回物理结果。刚体表由 `prepare` 在本帧
-        // 任何系统之前建好（旧端 `sync_bodies()` 同序）；别把建体挪进 `run`——
-        // 那会吃到 `VelocitySystem` 本帧的积分，整条轨迹多出 g·dt²。
+        // 刚体表由 prepare 在速度积分前建好，否则 Rapier 会把本步临时积分的位移
+        // 当成新刚体的初始位置。接触边沿和动体回写由同一步 Rapier 求解提供。
         schedule.add(RapierPhysicsSystem::default());
         // UI 布局 / 命中在宿主阶段之前（旧端 `update_ui()` 排在 Update 钩子之前）。
         schedule.add(UiLayoutSystem::default());

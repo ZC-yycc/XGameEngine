@@ -87,24 +87,23 @@ fn default_plan_is_contiguous_and_covers_registration_order() {
 fn default_plan_snapshot() {
     // 连续贪心按注册顺序切批：能续就续、冲突就封批。这份快照同时是 `xgc plan`
     // 的输出契约，改动系统注册顺序或访问声明必须同步这里。
-    // 宿主阶段夹在 ui_focus（8）与 animation_state（9）之间：脚本本帧写的动画
+    // 宿主阶段夹在 ui_focus（7）与 animation_state（8）之间：脚本本帧写的动画
     // 参数，状态机同帧就要看到。
     let expected = vec![
         PlanStage::Batch(vec![0]),
         PlanStage::Batch(vec![1]),
         PlanStage::Batch(vec![2]),
         PlanStage::Batch(vec![3]),
-        PlanStage::Batch(vec![4]),
-        PlanStage::Batch(vec![5, 6]),
+        PlanStage::Batch(vec![4, 5]),
+        PlanStage::Batch(vec![6]),
         PlanStage::Batch(vec![7]),
-        PlanStage::Batch(vec![8]),
         PlanStage::Host,
+        PlanStage::Batch(vec![8]),
         PlanStage::Batch(vec![9]),
-        PlanStage::Batch(vec![10]),
         // `animation_apply` 写 Transform、`animation_layers` 只写 AnimationLayers，
-        // 两者无写冲突 ⇒ 从本轮起合并进同一批（层时钟推进不依赖基础姿势）。
-        PlanStage::Batch(vec![11, 12]),
-        PlanStage::Batch(vec![13, 14, 15]),
+        // 层时钟推进不依赖基础姿势，两者可以同批。
+        PlanStage::Batch(vec![10, 11]),
+        PlanStage::Batch(vec![12, 13, 14]),
     ];
     assert_eq!(Schedule::default_schedule(1).plan().stages(), expected);
 }

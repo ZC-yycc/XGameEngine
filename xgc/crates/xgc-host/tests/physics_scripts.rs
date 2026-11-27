@@ -112,12 +112,14 @@ fn collision_hook_sets_solver_velocity_without_an_ecs_velocity_component() {
         local entered = false
         function on_collision_enter(ctx, other)
             assert(not entered and other ~= self_id(ctx))
+            assert(math.abs(pos(ctx).x) < 1e-5)
             entered = true
             set_velocity(ctx, self_id(ctx), -60, 0, 0)
             set_velocity(ctx, self_id(ctx), 120, 0, 0)
         end
         function on_collision_exit(ctx, other)
             assert(entered and other ~= self_id(ctx))
+            assert(math.abs(pos(ctx).x - 2.0) < 1e-5)
             set_velocity(ctx, self_id(ctx), 0, 0, 0)
         end
         "#,
@@ -145,16 +147,27 @@ fn collision_hook_sets_solver_velocity_without_an_ecs_velocity_component() {
             paths: vec!["physics.lua".into()],
         },
     ));
+    let body_id = world.entity(body).unwrap();
     let mut runner = root.runner(world);
-    let distances: Vec<_> = (0..5)
-        .map(|_| {
-            runner.step().unwrap();
-            position(&runner, body)[0]
-        })
-        .collect();
-    // 接触钩子在物理之后派发，最后一次速度写入须在下一步使刚体穿过传感器。
-    // AABB 在 Rapier 回写前检测离开，所以第三步报告 exit、第四步才停住。
-    for (distance, expected) in distances.into_iter().zip([0.0, 2.0, 4.0, 4.0, 4.0]) {
+    let mut distances = Vec::new();
+    let mut edges = Vec::new();
+    for frame in 1..=5 {
+        runner.step().unwrap();
+        distances.push(position(&runner, body)[0]);
+        edges.extend(
+            runner
+                .world()
+                .collision_events()
+                .iter()
+                .filter(|event| event.entity == body_id)
+                .map(|event| (frame, event.enter)),
+        );
+    }
+    eprintln!("沿 X 轴的位置 {distances:?}，动体接触边沿 {edges:?}");
+    // 进入回调的最后一条速度指令让动体在第二步穿出。Rapier 同步发出退出，
+    // 退出回调清掉的速度在第三步生效，防止动体多走一个固定步。
+    assert_eq!(edges, [(1, true), (2, false)]);
+    for (distance, expected) in distances.into_iter().zip([0.0, 2.0, 2.0, 2.0, 2.0]) {
         assert_near(distance, expected);
     }
     assert!(runner.world().get::<Velocity>(body).is_none());

@@ -15,10 +15,11 @@
 
 use rapier3d::na::{Isometry3, Point3, Translation3, UnitQuaternion, Vector3};
 use rapier3d::prelude::{
-    ColliderBuilder, ColliderHandle, QueryFilter, Ray, RigidBodyBuilder, RigidBodyHandle,
+    ActiveEvents, ColliderBuilder, ColliderHandle, QueryFilter, Ray, RigidBodyBuilder,
+    RigidBodyHandle,
 };
 
-use xgc_base::EntityKey;
+use xgc_base::{EntityId, EntityKey};
 use xgc_world::{PhysicsBody, Slope, World};
 
 use super::RapierWorld;
@@ -88,16 +89,9 @@ impl RapierWorld {
         }
         // 只重排坡面这一片：`physics.body` 与角色的刚体都不动。
         for link in std::mem::take(&mut self.slopes) {
-            self.bodies.remove(
-                link.body,
-                &mut self.islands,
-                &mut self.colliders,
-                &mut self.impulse_joints,
-                &mut self.multibody_joints,
-                true,
-            );
+            self.remove_contact_body(link.body, link.collider);
         }
-        for (_, key, def) in &entries {
+        for (id, key, def) in &entries {
             let body = self.bodies.insert(RigidBodyBuilder::fixed().build());
             let collider = self.colliders.insert_with_parent(
                 // 摩擦取大值：坡面是地面，站在上面不该被微小水平力推走；
@@ -105,10 +99,12 @@ impl RapierWorld {
                 ColliderBuilder::cuboid(half_length(def), SLOPE_THICKNESS * 0.5, def.size[1] * 0.5)
                     .friction(1.0)
                     .restitution(0.0)
+                    .active_events(ActiveEvents::COLLISION_EVENTS)
                     .build(),
                 body,
                 &mut self.bodies,
             );
+            self.contacts.register(collider, EntityId::from_raw(*id));
             // 刚体位姿带旋转：碰撞体的局部轴就按坡面摆好。
             if let Some(rigid_body) = self.bodies.get_mut(body) {
                 rigid_body.set_position(slope_isometry(def), false);

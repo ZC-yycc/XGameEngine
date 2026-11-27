@@ -10,7 +10,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use xgc_base::EntityKey;
-use xgc_sim::{AabbCollisionSystem, RapierPhysicsSystem, Simulation, System, FIXED_DT};
+use xgc_sim::{RapierPhysicsSystem, Simulation, System, FIXED_DT};
 use xgc_world::{BodyKind, GlobalTransform, PhysicsBody, Transform, Velocity, World};
 
 const WARMUP_STEPS: u64 = 18;
@@ -36,33 +36,19 @@ fn physics_yard_high() {
 }
 
 #[test]
-#[ignore = "需要 Release；对中档的 AABB 和 Rapier 做独立诊断采样"]
+#[ignore = "需要 Release；对中档 Rapier 做独立诊断采样"]
 fn physics_yard_mid_systems() {
     let (mut rapier_world, _) = yard(MID_BOXES, MID_COLUMNS);
     let mut rapier = RapierPhysicsSystem::default();
     for _ in 0..WARMUP_STEPS {
+        rapier_world.clear_collision_events();
         rapier.prepare(&rapier_world);
         rapier.run(&mut rapier_world, FIXED_DT);
     }
 
-    // 复制接触已经建立的同一份姿态。单独计时只用于定位开销，不能相加当作整帧。
-    let mut aabb_world = World::new();
-    aabb_world
-        .restore_world_data(&rapier_world.world_data())
-        .unwrap();
-    let mut aabb = AabbCollisionSystem::default();
-    for _ in 0..2 {
-        aabb_world.clear_collision_events();
-        aabb.run(&mut aabb_world, FIXED_DT);
-    }
-
-    let samples = sample_count(24);
-    let aabb = sample_steps(samples, |_| {
-        aabb_world.clear_collision_events();
-        aabb.run(&mut aabb_world, FIXED_DT);
-    });
-    aabb.report("S2 mid AABB isolated");
-    let rapier = sample_steps(samples, |_| {
+    // 和默认固定步一样，隔离步开始时也要清掉上一步的瞬态事件。
+    let rapier = sample_steps(sample_count(24), |_| {
+        rapier_world.clear_collision_events();
         rapier.prepare(&rapier_world);
         rapier.run(&mut rapier_world, FIXED_DT);
     });

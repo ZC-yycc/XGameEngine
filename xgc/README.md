@@ -19,12 +19,9 @@
 的唯一清单）、实体级 revision、世界快照 / 恢复、事务日志 JSON 往返与重放、状态哈希、
 `World::validate_data` 世界体检）、`xgc-store`（版本化 JSON 包络 + 原子写）、
 `xgc-sim`（Scenario / Trace / 固定步 `Schedule` / `SystemAccess` 冲突判定 /
-`Schedule::plan`（连续批次 + 宿主帧末阶段）/ `PhysicsSystem` / `CharacterJumpSystem` / `VelocitySystem` /
-`GroundCollisionSystem` / `AabbCollisionSystem` / `AnimationSystem` /
-`UiLayoutSystem` / `UiInteractionSystem` / `UiFocusSystem` / `GravitySystem` /
-`HierarchySystem`（默认调度 16 个系统；角色的三轴位移全由 `RapierPhysicsSystem` 的角色阶段推进：
-水平 collide-and-slide + 竖直重力 / 地面探测 / 贴地吸附 / 台阶，`CharacterSystem` / `CharacterStepSystem` /
-`CharacterBlockSystem` 都已删除） /
+`Schedule::plan`（连续批次 + 宿主阶段）/ `RapierPhysicsSystem`（刚体位姿回写、普通刚体和坡面的接触边沿、
+角色水平 collide-and-slide 与竖直重力 / 地面探测 / 贴地吸附 / 台阶）/
+UI 布局与交互 / 动画 / 音频 / `HierarchySystem`（默认调度共 15 个系统） /
 `AnimationClip` 平移 / 旋转 slerp / 缩放关键帧采样（边界钳制 / 循环取模）/ RON 剪辑加载 /
 `AnimationPlaybackSystem` 把采样结果叠加 `Animator.base_*` 写回 `Transform` /
 `SkeletonPoseSystem` 合成关节世界矩阵到 `animation.pose` / GLB `JOINTS_0` + `WEIGHTS_0`
@@ -189,20 +186,13 @@ apply / revert 各只推进一个 revision，回滚后状态哈希回到原值�
 销毁回滚恢复**原 EntityId 与全部组件**；组件增删同样保留 EntityId，回滚后
 archetype 与 state hash 回到原样。`WorldData` 可把整个世界落盘再恢复，
 `state_hash` / 实体 ID / revision 一致；`Journal` 可从初始快照重放并校验 revision。
-`xgc run 60` 已跑通固定步帧循环：命令 → 系统（`RapierPhysicsSystem` 用与旧引擎同版本的
-rapier3d 0.22 驱动 `physics.body` 实体，`PhysicsSystem` 只给非刚体实体的 dynamic 加
-重力、`CharacterJumpSystem` 消费起跳请求、`VelocitySystem` 给实体积分 `position += linear * dt`
-（带 `CharacterController` 的角色整份跳过——水平 collide-and-slide 与竖直重力 / 射线探地 / 贴地吸附 /
-台阶三段扫掠都在 `RapierPhysicsSystem` 的角色阶段，`CharacterSystem` / `CharacterStepSystem` 已删除）、
-`GroundCollisionSystem` 地面夹持、`AabbCollisionSystem` 两两分离动态刚体
-（接触时清掉沿分离轴的接近速度，落地 / 堆叠不再抖动）
-（球体按中心线精确分离）、`AnimatorSystem` 推进动画时钟、`UiLayoutSystem` 算 UI 根 /
-父相对矩形、裁剪区并继承可见性，`UiInteractionSystem` 读 `ui.input` 写 hover / press /
-click，`UiFocusSystem` 消费 nav / confirm 做 Tab 循环与方向键几何选邻，
-`Simulation::set_ui_input` 作为宿主输入桥，`hit_test` 取最上层可交互元素、
-`AudioMixerSystem` 按监听者距离 + `audio.mixer` 总线写 `audio.gain`、WAV（PCM16 /
-Float32）解码 + 目录素材库、`SoftwareMixer` 软件混音 + WAV 写出、`HierarchySystem`
-合成世界变换）→ 快照 / trace。`render-frame` 的可选帧数缺省为 0；显式传入时复用
+`xgc run 60` 在固定步开始时结算命令，再运行系统并输出快照或 trace。`PhysicsSystem` 加重力，
+`CharacterJumpSystem` 消费起跳请求，`VelocitySystem` 积分 `position += linear * dt`，
+`GroundCollisionSystem` 做地面夹持。`RapierPhysicsSystem` 用 rapier3d 0.22 解算并回写动态刚体，发布
+普通刚体和坡面的接触边沿。带 `CharacterController` 的实体由其角色阶段推进三轴位移。
+UI 在宿主阶段前更新布局、命中和焦点，`Simulation::set_ui_input` 提供输入。动画在宿主阶段后推进时钟
+并应用姿态，`AudioMixerSystem` 按监听者距离与 `audio.mixer` 总线写 `audio.gain`，
+`HierarchySystem` 合成世界变换。`render-frame` 的可选帧数缺省为 0，显式传入时复用
 `Simulation::step_with` + `ScriptRuntime::run_frame` 推进固定 60 Hz 正式帧，每步随后推进同一份
 `ParticleSystem`，再按截图尺寸重算 `GlobalTransform` 与 UI 布局；编辑器 Play 与图形播放器复用同一粒子系统并把当帧四边形交给 `Renderer`。`VelocitySystem` 按 archetype 分片并行，1 / 2 / 8
 线程 state hash 逐位一致。

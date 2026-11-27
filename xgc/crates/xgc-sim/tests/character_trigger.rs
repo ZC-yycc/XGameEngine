@@ -1,5 +1,4 @@
-//! 角色 vs 传感器（trigger）：角色没有 `physics.body`，AABB 看不到它，接触由
-//! `RapierWorld::move_characters` 里的胶囊求交产生。
+//! 角色移动后以实际胶囊求交产生传感器接触边沿。
 
 use xgc_sim::{Schedule, FIXED_DT};
 use xgc_world::{CharacterController, PhysicsBody, Transform, Velocity, World};

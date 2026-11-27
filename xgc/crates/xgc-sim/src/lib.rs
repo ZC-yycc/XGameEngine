@@ -25,7 +25,6 @@ mod schedule;
 
 pub use schedule::{default_system_names, Plan, PlanStage, Schedule, System, SystemAccess};
 
-mod aabb;
 mod animation;
 mod animation_layers;
 mod animation_state;
@@ -41,7 +40,6 @@ mod skeleton;
 mod systems;
 mod ui;
 
-pub use aabb::AabbCollisionSystem;
 pub use animation::{
     load_clip_ron, mul_quat, slerp, AnimationClip, AnimationLibrary, AnimationPlaybackSystem,
     JointTrack, RotationKey, ScaleKey, TranslationKey,

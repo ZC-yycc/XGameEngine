@@ -1,7 +1,7 @@
-//! 刚体、简化接触和角色查询须使用同一份项目掩码。
+//! 角色查询和普通刚体碰撞体共用项目掩码。
 
 use xgc_base::layer::{CollisionLayers, LayerIndex};
-use xgc_sim::{AabbCollisionSystem, Schedule, System, FIXED_DT};
+use xgc_sim::{Schedule, FIXED_DT};
 use xgc_world::{CharacterController, CollisionLayer, PhysicsBody, Transform, Velocity, World};
 
 fn isolated_layer() -> CollisionLayer {
@@ -32,40 +32,6 @@ fn platform(y: f32, is_sensor: bool) -> (Transform, PhysicsBody, CollisionLayer)
         },
         isolated_layer(),
     )
-}
-
-#[test]
-fn aabb_reports_exit_when_either_membership_starts_blocking() {
-    let mut world = World::new();
-    let moving = world.spawn((
-        Transform::default(),
-        PhysicsBody::default(),
-        CollisionLayer::default(),
-    ));
-    let sensor = world.spawn(platform(0.0, true));
-    let moving_id = world.entity(moving).unwrap();
-    let sensor_id = world.entity(sensor).unwrap();
-    let mut aabb = AabbCollisionSystem::default();
-
-    for (layers, entering) in [
-        (CollisionLayers::default(), true),
-        (block_layer(), false),
-        (CollisionLayers::default(), true),
-    ] {
-        world.set_collision_layers(&layers);
-        world.clear_collision_events();
-        aabb.run(&mut world, FIXED_DT);
-        let events = world.collision_events();
-        assert_eq!(events.len(), 2, "静止重叠随矩阵跨越接触边界：{events:?}");
-        assert!(events.iter().all(|event| event.enter == entering));
-        assert!(events
-            .iter()
-            .any(|event| event.entity == moving_id && event.other == sensor_id));
-        assert!(events
-            .iter()
-            .any(|event| event.entity == sensor_id && event.other == moving_id));
-    }
-    assert_eq!(world.get::<Transform>(moving).unwrap().position, [0.0; 3]);
 }
 
 #[test]

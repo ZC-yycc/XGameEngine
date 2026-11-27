@@ -1,13 +1,7 @@
 //! Rapier 刚体后端：与旧引擎同一套求解器与参数（rapier3d 0.22 + `simd-stable`）。
 //!
-//! 为什么不用自研简化碰撞：割接要求**同帧状态可比**。旧端用 rapier 的默认
-//! `IntegrationParameters`、`gravity = (0, -9.81, 0)`、每固定帧 `step(fixed_dt)`
-//! 一次；这里逐项照搬，落点与翻滚姿态才有机会和旧图对上（简化 AABB 求解器
-//! 没有角动量，盒子永远不会翻滚）。
-//!
-//! 这一刀的范围：`physics.body` 实体（静态 / 动态 / 运动学）+ `physics.character`
-//! 实体的**水平** collide-and-slide（`character_kcc`）。角色的竖直 / 坡面 / 贴地 /
-//! 台阶仍走 `xgc-sim` 的既有系统，理由见 `character_kcc` 模块文档。
+//! 普通刚体和坡面的接触事件从同一次物理步的窄相收集，触发依赖真实形状，固体依赖
+//! 活跃接触。角色有皮肤间隙，需要自己的扫掠和传感器查询，见 `character_kcc` 模块。
 
 use rapier3d::na::Vector3;
 use rapier3d::prelude::*;
@@ -22,11 +16,13 @@ use crate::{System, SystemAccess};
 
 mod bodies;
 mod characters;
+mod contacts;
 mod explain;
 mod groups;
 mod slopes;
 use bodies::{isometry, world_transform, BodyLink, BodySignature};
 use characters::CharacterLink;
+use contacts::ContactEvents;
 pub use explain::{ColliderOverlap, OverlapBody};
 use slopes::{SlopeEntry, SlopeLink, SlopeSignature};
 
@@ -48,6 +44,7 @@ pub struct RapierWorld {
     ccd: CCDSolver,
     impulse_joints: ImpulseJointSet,
     multibody_joints: MultibodyJointSet,
+    contacts: ContactEvents,
     links: Vec<BodyLink>,
     filtered: bool,
     /// 建体时的输入签名（按 ID 排序）；第一次建表整份重建，之后按 ID 差量修补。
@@ -113,6 +110,7 @@ impl RapierWorld {
             ccd: CCDSolver::new(),
             impulse_joints: ImpulseJointSet::new(),
             multibody_joints: MultibodyJointSet::new(),
+            contacts: ContactEvents::default(),
             links: Vec::new(),
             filtered: false,
             built_signature: None,
@@ -193,7 +191,7 @@ impl RapierWorld {
             &mut self.ccd,
             Some(&mut self.query),
             &(),
-            &(),
+            &self.contacts,
         );
 
         for link in &self.links {
@@ -219,6 +217,8 @@ impl RapierWorld {
             }
         }
 
+        // 普通刚体边沿先于角色查询结果发布，宿主读取时两组都已写入。
+        self.contacts.publish(world);
         self.move_characters(world);
     }
 }

@@ -127,6 +127,7 @@ impl RapierWorld {
     /// 场景里手写的 `(0.2, 0, 0, 0.98)` 这类非单位旋转到旧端是合法姿态、到 rapier
     /// 直接当 `UnitQuaternion` 用会得到非正交矩阵（落地接触分叉的根因）。
     pub(super) fn insert_body(&mut self, world: &World, key: EntityKey) -> Option<BodyLink> {
+        let entity = world.entity(key)?;
         let def = world.get::<PhysicsBody>(key)?.clone();
         let world_transform = world_transform(world, key, &mut self.body_transform_chain)?;
         let (body, collider) = build_body(&def, &world_transform);
@@ -134,6 +135,7 @@ impl RapierWorld {
         let collider = self
             .colliders
             .insert_with_parent(collider, handle, &mut self.bodies);
+        self.contacts.register(collider, entity);
         let kind = def.kind();
         Some(BodyLink {
             key,
@@ -145,7 +147,8 @@ impl RapierWorld {
         })
     }
 
-    fn remove_body(&mut self, body: RigidBodyHandle) {
+    pub(super) fn remove_contact_body(&mut self, body: RigidBodyHandle, collider: ColliderHandle) {
+        self.contacts.retire(collider);
         self.bodies.remove(
             body,
             &mut self.islands,
@@ -166,7 +169,7 @@ impl RapierWorld {
         for probe in &signature {
             let id = probe.0;
             while index < old_signature.len() && old_signature[index].0 < id {
-                self.remove_body(old_links[index].body);
+                self.remove_contact_body(old_links[index].body, old_links[index].collider);
                 changed = true;
                 index += 1;
             }
@@ -176,7 +179,7 @@ impl RapierWorld {
                     index += 1;
                     continue;
                 }
-                self.remove_body(old_links[index].body);
+                self.remove_contact_body(old_links[index].body, old_links[index].collider);
                 changed = true;
                 index += 1;
             }
@@ -195,7 +198,7 @@ impl RapierWorld {
             changed = true;
         }
         while index < old_signature.len() {
-            self.remove_body(old_links[index].body);
+            self.remove_contact_body(old_links[index].body, old_links[index].collider);
             changed = true;
             index += 1;
         }
@@ -280,6 +283,7 @@ fn build_body(def: &PhysicsBody, world: &Transform) -> (RigidBody, Collider) {
         .restitution(def.restitution)
         .sensor(def.is_sensor)
         .density(density)
+        .active_events(ActiveEvents::COLLISION_EVENTS)
         .build();
     let iso = isometry(world);
     let body = match body_type {
