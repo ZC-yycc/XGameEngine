@@ -199,6 +199,7 @@ impl World {
         }
 
         self.host_ui_input = None;
+        self.body_velocities.clear();
         let keys: Vec<_> = self.by_id.values().copied().collect();
         for key in keys {
             let _ = self.despawn_raw(key);

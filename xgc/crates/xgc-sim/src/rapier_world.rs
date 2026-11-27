@@ -151,6 +151,22 @@ impl RapierWorld {
             }
         }
 
+        // 只结算显式脚本指令，避免把 ECS 在本步临时积分的速度重新注入 Rapier。
+        let signatures = self.built_signature.as_deref().unwrap_or_default();
+        for (entity, key, linear) in world.drain_body_velocities() {
+            let Ok(index) = signatures.binary_search_by_key(&entity.raw(), |signature| signature.0)
+            else {
+                continue;
+            };
+            let link = &self.links[index];
+            if link.key != key {
+                continue;
+            }
+            if let Some(body) = self.bodies.get_mut(link.body) {
+                body.set_linvel(Vector3::from(linear), true);
+            }
+        }
+
         self.integration.dt = if dt.is_finite() && dt > 0.0 {
             dt
         } else {
@@ -285,6 +301,22 @@ mod tests {
         );
         let velocity = *world.get::<Velocity>(cube).unwrap();
         assert!(velocity.linear[1].abs() < 0.01, "落地后竖直速度应归零");
+    }
+
+    #[test]
+    fn kinematic_body_velocity_moves_the_collider_after_scene_pose_sync() {
+        let mut world = World::new();
+        let platform = spawn(&mut world, [0.0, 3.0, 0.0], [1.0; 3], "kinematic");
+        let id = world.entity(platform).unwrap();
+        let mut physics = RapierWorld::new();
+        physics.step(&mut world, FIXED_DT);
+        assert!(physics.ground_under(2.0, 0.0, 4.0).is_none());
+
+        world.queue_body_velocity(id, [120.0, 0.0, 0.0]);
+        physics.step(&mut world, FIXED_DT);
+        assert_eq!(physics.ground_under(2.0, 0.0, 4.0), Some(3.5));
+        assert!(physics.ground_under(0.0, 0.0, 4.0).is_none());
+        assert_eq!(world.get::<Transform>(platform).unwrap().position[0], 0.0);
     }
 
     /// 翻滚能力：带初始倾角的动态盒子落地后姿态必须变化（简化 AABB 做不到）。

@@ -241,22 +241,27 @@ impl ScriptRuntime {
             }
         }
         self.discard_action_edges();
-        if pending.is_empty() {
-            return;
-        }
-        let plan = world.plan(pending);
-        if plan.is_valid() {
+        let mut view = self.view.borrow_mut();
+        let body_velocities = view.body_velocities.drain(..);
+        if !pending.is_empty() {
+            let plan = world.plan(pending);
+            if !plan.is_valid() {
+                note_error(
+                    &mut self.frame_error,
+                    format!("命令计划无效：{:?}", plan.diagnostics),
+                );
+                return;
+            }
             if let Err(diagnostics) = world.apply(&plan) {
                 note_error(
                     &mut self.frame_error,
                     format!("命令应用失败：{diagnostics:?}"),
                 );
+                return;
             }
-        } else {
-            note_error(
-                &mut self.frame_error,
-                format!("命令计划无效：{:?}", plan.diagnostics),
-            );
+        }
+        for (entity, linear) in body_velocities {
+            world.queue_body_velocity(entity, linear);
         }
     }
 

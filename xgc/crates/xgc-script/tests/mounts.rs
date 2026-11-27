@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use xgc_script::ScriptRuntime;
-use xgc_world::{CollisionEvent, FiredAnimEvent, Script, Transform, UiElement, World};
+use xgc_world::{CollisionEvent, FiredAnimEvent, PhysicsBody, Script, Transform, UiElement, World};
 
 struct Scripts(PathBuf);
 
@@ -320,7 +320,12 @@ fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() 
         );
     }
     let mut world = World::new();
-    let entity = world.spawn((UiElement::default(), mounts(&["a.lua", "b.lua"])));
+    let entity = world.spawn((
+        UiElement::default(),
+        Transform::default(),
+        PhysicsBody::default(),
+        mounts(&["a.lua", "b.lua"]),
+    ));
     let mut runtime = scripts.runtime();
     step(&mut runtime, &mut world);
     assert_eq!(world.get::<UiElement>(entity).unwrap().text, "ab");
@@ -330,6 +335,8 @@ fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() 
         r#"
         ui_spawn_label(nil, 'candidate', 0, 0, 20)
         ui_set_text(nil, self_id(nil), 'candidate text')
+        set_velocity(nil, self_id(nil), 1, 2, 3)
+        assert(velocity(nil, self_id(nil)).y == 2)
         set_bus_volume(nil, 'bgm', 0.125)
         play_sound(nil, 'candidate.wav', 1, 1)
         table.concat = function() return 'candidate library' end
@@ -356,6 +363,7 @@ fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() 
     step(&mut runtime, &mut world);
     assert_eq!(world.get::<UiElement>(entity).unwrap().text, "abab");
     assert_eq!(world.len(), 1);
+    assert_eq!(world.drain_body_velocities().next(), None);
 
     scripts.write(
         "b.lua",
@@ -371,6 +379,7 @@ fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() 
     step(&mut runtime, &mut world);
     assert_eq!(world.get::<UiElement>(entity).unwrap().text, "ababAB");
     assert_eq!(world.len(), 1);
+    assert_eq!(world.drain_body_velocities().next(), None);
 }
 
 #[test]

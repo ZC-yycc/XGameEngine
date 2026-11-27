@@ -19,6 +19,7 @@ mod layer_components;
 mod lod_components;
 mod particle_components;
 mod parts;
+mod physics_commands;
 mod physics_components;
 mod plugin_components;
 mod prefab_components;
@@ -308,6 +309,7 @@ pub struct World {
     collision_events: Vec<CollisionEvent>,
     /// 本步命中的动画事件（瞬态；`step_with` 每步开头清空）。
     animation_events: Vec<FiredAnimEvent>,
+    body_velocities: Vec<(EntityId, EntityKey, [f32; 3])>,
     /// 宿主设备状态属于当前播放会话，不参与场景序列化或哈希。
     host_ui_input: Option<HostUiState>,
 }
@@ -332,6 +334,7 @@ impl World {
             environment: SceneEnvironment::default(),
             collision_events: Vec::new(),
             animation_events: Vec::new(),
+            body_velocities: Vec::new(),
             host_ui_input: None,
         };
         world.register_builtin_components();

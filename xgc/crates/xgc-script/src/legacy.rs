@@ -8,8 +8,8 @@ use std::rc::Rc;
 use mlua::{Lua, Table};
 use xgc_base::EntityId;
 use xgc_world::{
-    AnimationLayers, AnimationState, Animator, Command, Component, Transform, Value as FieldValue,
-    Velocity,
+    AnimationLayers, AnimationState, Animator, BodyKind, Command, Component, Transform,
+    Value as FieldValue, Velocity,
 };
 
 /// 脚本 API 的颜色参数是 **sRGB 0..1**（美术 / CSS 的直觉：`0.5` 就是中灰），
@@ -210,18 +210,32 @@ pub(crate) fn register(
         .map_err(|err| err.to_string())?;
 
     let set_velocity_commands = Rc::clone(commands);
+    let set_velocity_view = Rc::clone(view);
     globals
         .set(
             "set_velocity",
             lua.create_function(
                 move |_, (_ctx, id, x, y, z): (mlua::Value, u64, f32, f32, f32)| {
-                    push_set(
-                        &set_velocity_commands,
-                        id,
-                        Velocity::ID,
-                        "linear",
-                        FieldValue::Vec3([f64::from(x), f64::from(y), f64::from(z)]),
-                    );
+                    let mut view = set_velocity_view.borrow_mut();
+                    match view.entity(id).and_then(|row| row.body_kind) {
+                        Some(BodyKind::Static) => {}
+                        Some(_) => {
+                            let linear = [x, y, z];
+                            if !linear.iter().all(|value| value.is_finite()) {
+                                return Ok(());
+                            }
+                            // 同一钩子通过 velocity 可读回命令，固定步之后由后端回写结果。
+                            view.entity_mut(id).expect("已找到刚体").velocity = linear;
+                            view.body_velocities.push((EntityId::from_raw(id), linear));
+                        }
+                        None => push_set(
+                            &set_velocity_commands,
+                            id,
+                            Velocity::ID,
+                            "linear",
+                            FieldValue::Vec3([f64::from(x), f64::from(y), f64::from(z)]),
+                        ),
+                    }
                     Ok(())
                 },
             )

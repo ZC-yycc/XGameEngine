@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use xgc_base::{EntityId, EntityKey};
 use xgc_world::{
-    AnimationLayers, AnimationState, CharacterController, Component, ComponentId, FieldPath, Name,
-    Transform, UiElement, UiInteraction, Value, Velocity, World,
+    AnimationLayers, AnimationState, BodyKind, CharacterController, Component, ComponentId,
+    FieldPath, Name, PhysicsBody, Transform, UiElement, UiInteraction, Value, Velocity, World,
 };
 
 use crate::audio_api::{AudioCheckpoint, ScriptAudio};
@@ -39,6 +39,7 @@ pub struct EntityView {
     pub velocity: [f32; 3],
     /// 是否有 `core.velocity`；角色脚本第一次移动时可能要先补这个组件。
     pub has_velocity: bool,
+    pub body_kind: Option<BodyKind>,
     /// 角色控制器是否贴地（没有 `physics.character` 的实体恒为 false）。
     pub grounded: bool,
     pub anim_parameters: Option<Value>,
@@ -65,6 +66,7 @@ impl EntityView {
         let velocity = world.get::<Velocity>(key);
         self.has_velocity = velocity.is_some();
         self.velocity = velocity.map_or([0.0; 3], |velocity| velocity.linear);
+        self.body_kind = world.get::<PhysicsBody>(key).map(PhysicsBody::kind);
         self.grounded = world
             .get::<CharacterController>(key)
             .is_some_and(|character| character.grounded);
@@ -116,6 +118,7 @@ pub struct ActionState {
 struct MountCheckpoint {
     spawn_cursor: u64,
     audio: AudioCheckpoint,
+    body_velocity_count: usize,
     entities: Vec<EntityView>,
 }
 
@@ -129,6 +132,8 @@ pub struct ScriptView {
     pub axes: BTreeMap<String, f32>,
     /// 同一播放会话内所有脚本共用音量与命令队列。
     pub audio: ScriptAudio,
+    /// 刚体指令跟随本帧脚本批次提交，初始化预检会撤销候选写入。
+    pub(crate) body_velocities: Vec<(EntityId, [f32; 3])>,
     /// 下一帧可用的实体 ID（每帧从世界的 ID 分配游标重置）。
     ///
     /// 旧端 `ui_spawn` 用 `EntityId::new()` 单调分配；这里用世界计数器派生，
@@ -156,6 +161,7 @@ impl ScriptView {
             view.mount_checkpoint = Some(MountCheckpoint {
                 spawn_cursor: view.spawn_cursor,
                 audio: view.audio.checkpoint(),
+                body_velocity_count: view.body_velocities.len(),
                 entities: Vec::new(),
             });
         }
@@ -172,6 +178,8 @@ impl ScriptView {
             view.pending_spawns
                 .retain(|id, _| *id < checkpoint.spawn_cursor);
             view.audio.restore(checkpoint.audio);
+            view.body_velocities
+                .truncate(checkpoint.body_velocity_count);
         }
         result
     }

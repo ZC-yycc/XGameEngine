@@ -106,6 +106,14 @@ Lua 的 `print`、`warn`、`log(ctx, ...)` 与 `xgc.log` 统一写入 stderr。C
 
 编辑器 Play 每秒比较已装入 Lua VM 的源文件修改时间和大小，暂停期间仍会检查。变更批次在固定步和工具栏单步之前切换，改坏或删除脚本时旧模块继续运行，修改后的下一批会重试。回归覆盖 GUID 挂载、删除与重建、同批失败和无改动挂载的局部变量保留，并验证 Stop 后编辑态及文件原文。[编辑器回归](crates/xgc-editor/src/app/reload_tests.rs) · [批次回归](crates/xgc-script/tests/mounts.rs)
 
+## 脚本物理固定步
+
+Lua 的 `set_velocity` 对动态和运动学刚体在当前钩子内可用 `velocity` 读回。脚本批次提交后，Rapier 在下一固定步解算前按调用顺序消费指令一次，随后速度由解算推进。这个边界让重力继续累积，并让没有 `core.velocity` 的刚体也能响应。静态刚体保持固定，非刚体可继续写入 `core.velocity`。重载预检会撤回候选指令。没有 `core.velocity` 的刚体在下一钩子的 `velocity` 读回，以及运动学刚体的跨步速度读回，仍待与旧端对表。
+
+在 `f77c354` 上，真实 Lua 发出一次 6.5 m/s 的向上速度命令，下一步 Rapier 回写 −0.4905001 m/s。修复后回写 6.3365 m/s，三轴实际位移符合四子步积分，后续一步继续受重力。碰撞钩子回归验证进入时的最后一条速度指令推进无速度组件的刚体，退出时的指令使其停止。运动学回归从物理查询确认碰撞体位移。[共享宿主回归](crates/xgc-host/tests/physics_scripts.rs) · [运动学回归](crates/xgc-sim/src/rapier_world.rs) · [批次重载回归](crates/xgc-script/tests/mounts.rs)
+
+同机 Release 预热后各测 60 帧。210 实体混合场景的 438 次分配、45,424 字节和八层父链运动学场景的 180 次分配、5,760 字节前后相同。1,026 控件的 HUD 布局仍为零。脚本帧视图的 4,096 背景实体用例测得 1,261 次、75,517 字节。工作区全目标检查、严格 Clippy、xtask 和八个受影响包的 487 项测试通过，另有 6 项测试忽略。两次 schema 导出与修改前逐字节相同。showcase 的 151 个检查点在串行和四线程下均与参考一致，同机四张严格截图通过。角色场景四个入口在第 120 步得到 6 个实体和 `c123b7e8fd701709`，完整快照与修改前一致。[仿真分配回归](crates/xgc-sim/tests/steady_state.rs) · [帧视图分配回归](crates/xgc-script/tests/view_allocations.rs)
+
 ## 脚本音频与混音
 
 `play_sound`、带位置和总线的播放、停止、监听者及音量控制通过共享宿主在固定步结束时结算。片段按项目搜索顺序或 GUID 解析。同一会话内复用解码后的 WAV，现有声部随总线音量和监听位置更新。48 kHz 单声道 PCM 使用调用方缓冲，按源采样率及 pitch 采样。测试核对了命令先后、现有声部的音量变化、跨块循环及采样值。44.1 kHz 的 `Beep.wav` 经 CLI 同采样率混音，前后 WAV 逐字节一致。[宿主混音回归](crates/xgc-host/tests/audio.rs) · [采样回归](crates/xgc-sim/tests/audio.rs)
