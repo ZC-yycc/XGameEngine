@@ -98,6 +98,39 @@ fn spawns_and_deletes_entities() {
 }
 
 #[test]
+fn exhausted_entity_ids_preserve_editor_state() {
+    let mut world = World::new();
+    let mut data = world.world_data();
+    data.next_id = u64::MAX - 1;
+    world.restore_world_data(&data).unwrap();
+    let key = world.spawn((Name::default(), Transform::default()));
+    let id = world.entity(key).unwrap();
+    let before = world.world_data();
+    let mut editor = EditorState::new(world);
+    editor.select(Some(id));
+
+    let error = editor.spawn_entity("exhausted").unwrap_err();
+    assert!(error.contains("超出持久 ID 上限"), "{error}");
+    assert_eq!(editor.world().world_data(), before);
+    assert_eq!(editor.selected(), Some(id));
+    assert!(!editor.is_dirty());
+    assert!(!editor.can_undo());
+    assert!(!editor.can_redo());
+
+    let position = [2.0, 0.0, 0.0];
+    editor.checkpoint();
+    editor.set_entity_position(id, position).unwrap();
+    assert!(editor.undo().unwrap());
+    assert!(editor.spawn_entity("exhausted").is_err());
+    assert_eq!(editor.world().world_data(), before);
+    assert_eq!(editor.selected(), Some(id));
+    assert!(editor.is_dirty());
+    assert!(!editor.can_undo());
+    assert!(editor.redo().unwrap());
+    assert_eq!(editor.entity_position(id), Some(position));
+}
+
+#[test]
 fn adds_and_removes_components() {
     let mut editor = EditorState::default();
     let id = editor.spawn_entity("box").unwrap();

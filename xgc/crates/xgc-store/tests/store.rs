@@ -57,6 +57,39 @@ fn world_data_roundtrip_and_no_rewrite() {
 }
 
 #[test]
+fn json_world_distinguishes_the_final_id_from_the_exhausted_cursor() {
+    let mut data = xgc_world::WorldData {
+        next_id: u64::MAX,
+        entities: vec![xgc_world::EntityData::new(EntityId::from_raw(u64::MAX - 1))],
+        ..Default::default()
+    };
+    let dir = temp_dir("final_id");
+    let path = dir.join("world.json");
+    save_world(&path, &data).unwrap();
+    let saved = fs::read(&path).unwrap();
+    let decoded = load_world(&path).unwrap();
+    let mut input: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(
+        input["payload"]["entities"][0]["id"],
+        (u64::MAX - 1).to_string()
+    );
+    assert_eq!(input["payload"]["next_id"], u64::MAX);
+    assert_eq!(decoded, data);
+
+    data.entities[0].id = EntityId::from_raw(u64::MAX);
+    let invalid_save = save_world(&path, &data);
+    let saved_after_rejection = fs::read(&path).unwrap();
+    input["payload"]["entities"][0]["id"] = serde_json::json!(u64::MAX.to_string());
+    fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+    let invalid_load = load_world(&path);
+    fs::remove_dir_all(dir).unwrap();
+    for error in [invalid_load.unwrap_err(), invalid_save.unwrap_err()] {
+        assert!(error.to_string().contains(&u64::MAX.to_string()), "{error}");
+    }
+    assert_eq!(saved_after_rejection, saved);
+}
+
+#[test]
 fn prefab_uses_its_own_envelope_kind() {
     let dir = temp_dir("prefab");
     let prefab = dir.join("asset.prefab.json");

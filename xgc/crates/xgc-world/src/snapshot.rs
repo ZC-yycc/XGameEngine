@@ -173,6 +173,7 @@ impl World {
         snapshot: EntitySnapshot,
     ) -> Result<EntityId, String> {
         let id = snapshot.id;
+        id.validate().map_err(|error| error.to_string())?;
         if self.by_id.contains_key(&id) {
             return Err(format!("实体 ID 已被占用：{id}"));
         }

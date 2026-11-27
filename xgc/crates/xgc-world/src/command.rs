@@ -122,6 +122,12 @@ impl World {
         if plan.base_revision != self.revision() {
             return Err(vec![conflict(self.revision())]);
         }
+        // 公开的 Plan 可以绕过规划器。结构回滚会换代句柄，所以要先检查坏 ID。
+        for command in &plan.commands {
+            if let Command::Spawn { data } | Command::Replace { data } = command {
+                validate_data_id(data.id).map_err(|error| vec![error])?;
+            }
+        }
 
         let next_id = self.next_id;
         let mut inverse = Vec::with_capacity(plan.commands.len());
@@ -293,6 +299,16 @@ impl World {
 
 fn diag(code: &'static str, subject: Subject, message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(code, Severity::Error, subject, message)
+}
+
+fn validate_data_id(id: EntityId) -> Result<(), Diagnostic> {
+    id.validate().map_err(|error| {
+        diag(
+            codes::EDIT_INVALID_SPAWN,
+            Subject::Entity(id),
+            error.to_string(),
+        )
+    })
 }
 
 fn conflict(current: u64) -> Diagnostic {

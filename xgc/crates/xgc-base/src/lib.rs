@@ -15,7 +15,7 @@ pub use diagnostics::{catalog as diagnostic_catalog, DiagnosticCode};
 use std::fmt;
 
 use serde::de::{Deserializer, Error as DeError};
-use serde::ser::Serializer;
+use serde::ser::{Error as SerError, Serializer};
 use serde::{Deserialize, Serialize};
 
 /// 持久实体身份：项目级单调分配，永不复用。
@@ -26,6 +26,10 @@ use serde::{Deserialize, Serialize};
 pub struct EntityId(u64);
 
 impl EntityId {
+    /// 游标可以走到 `u64::MAX` 表示已耗尽，持久身份必须留出这最后一格。
+    pub const MAX_ASSIGNABLE_RAW: u64 = u64::MAX - 1;
+
+    /// 仅包装原值，供运行时代码和分配游标使用。
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
@@ -33,7 +37,32 @@ impl EntityId {
     pub const fn raw(self) -> u64 {
         self.0
     }
+
+    /// 写入或接收持久身份时，拒绝留给分配游标的哨兵。
+    pub const fn validate(self) -> Result<(), InvalidEntityId> {
+        if self.0 <= Self::MAX_ASSIGNABLE_RAW {
+            Ok(())
+        } else {
+            Err(InvalidEntityId(self.0))
+        }
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidEntityId(u64);
+
+impl fmt::Display for InvalidEntityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "实体 ID {} 超出持久 ID 上限 {}",
+            self.0,
+            EntityId::MAX_ASSIGNABLE_RAW
+        )
+    }
+}
+
+impl std::error::Error for InvalidEntityId {}
 
 impl fmt::Debug for EntityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -49,6 +78,7 @@ impl fmt::Display for EntityId {
 
 impl Serialize for EntityId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(S::Error::custom)?;
         serializer.serialize_str(&self.0.to_string())
     }
 }
@@ -56,9 +86,12 @@ impl Serialize for EntityId {
 impl<'de> Deserialize<'de> for EntityId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
-        text.parse::<u64>()
+        let id = text
+            .parse::<u64>()
             .map(Self)
-            .map_err(|err| D::Error::custom(format!("实体 ID 不是十进制 u64：{err}")))
+            .map_err(|err| D::Error::custom(format!("实体 ID 不是十进制 u64：{err}")))?;
+        id.validate().map_err(D::Error::custom)?;
+        Ok(id)
     }
 }
 

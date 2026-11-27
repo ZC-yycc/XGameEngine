@@ -358,6 +358,10 @@ impl EditorState {
         if self.play.is_some() {
             return Err("Play 期间不能新建实体".to_string());
         }
+        self.world
+            .next_entity_id()
+            .validate()
+            .map_err(|err| format!("新建实体失败：{err}"))?;
         self.push_undo();
         let key = self.world.spawn((
             Name {

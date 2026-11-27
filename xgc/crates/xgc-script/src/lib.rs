@@ -387,6 +387,10 @@ impl LuaHost {
             .lua
             .create_function(move |_, ()| {
                 let mut world = spawn_world.borrow_mut();
+                world
+                    .next_entity_id()
+                    .validate()
+                    .map_err(|error| mlua::Error::RuntimeError(error.to_string()))?;
                 let key = world.spawn((Transform::default(),));
                 world
                     .entity(key)

@@ -149,7 +149,7 @@ impl World {
             .map(|(index, meta)| (meta.id, EntityKey::new(index as u32, meta.generation)))
     }
 
-    /// 查看分配游标，包含已预留但尚未生成实体的 ID；不预留或推进它。
+    /// 查看下一个未预留的分配游标。原值为 `u64::MAX` 表示已经耗尽。
     pub fn next_entity_id(&self) -> EntityId {
         EntityId::from_raw(self.next_id)
     }
@@ -188,6 +188,16 @@ impl World {
 
     /// 从可序列化世界数据重建；实体 ID / revision / 组件全部保留。
     pub fn restore_world_data(&mut self, data: &WorldData) -> Result<(), String> {
+        // 先构造全部实体，最后一行有错时也要保留原世界和句柄。
+        let mut ids = HashSet::with_capacity(data.entities.len());
+        let mut snapshots = Vec::with_capacity(data.entities.len());
+        for entity in &data.entities {
+            if !ids.insert(entity.id) {
+                return Err(format!("实体 ID 已被占用：{}", entity.id));
+            }
+            snapshots.push(self.snapshot_from_data(entity)?);
+        }
+
         self.host_ui_input = None;
         let keys: Vec<_> = self.by_id.values().copied().collect();
         for key in keys {
@@ -196,15 +206,15 @@ impl World {
         self.revision = data.revision;
         self.next_id = data.next_id;
         self.environment = data.environment.clone();
-        for entity in &data.entities {
-            let snapshot = self.snapshot_from_data(entity)?;
+        for snapshot in snapshots {
             self.restore_entity_raw(snapshot)?;
         }
         Ok(())
     }
 
-    /// 把可序列化数据构造成一列一行的实体快照；组件 / 字段 / 类型都在这里校验。
+    /// 把可序列化数据构造成一列一行的实体快照；校验实体 ID 和组件数据。
     pub fn snapshot_from_data(&self, data: &EntityData) -> Result<EntitySnapshot, String> {
+        data.id.validate().map_err(|error| error.to_string())?;
         let mut components = Vec::with_capacity(data.components.len());
         let mut seen = HashSet::new();
 

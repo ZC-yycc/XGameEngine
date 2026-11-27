@@ -28,6 +28,7 @@ pub fn encode_world(data: &WorldData) -> std::result::Result<Vec<u8>, String> {
     write_environment(&mut writer, &data.environment)?;
     writer.length(data.entities.len())?;
     for entity in &data.entities {
+        entity.id.validate().map_err(|error| error.to_string())?;
         writer.u64(entity.id.raw());
         writer.u64(entity.revision);
         writer.length(entity.components.len())?;
@@ -59,6 +60,7 @@ pub fn decode_world(bytes: &[u8]) -> std::result::Result<WorldData, String> {
     let mut entities = Vec::with_capacity(entity_count);
     for _ in 0..entity_count {
         let id = EntityId::from_raw(reader.u64()?);
+        id.validate().map_err(|error| error.to_string())?;
         let revision = reader.u64()?;
         let component_count = reader.count(4 + 4)?;
         let mut components = Vec::with_capacity(component_count);

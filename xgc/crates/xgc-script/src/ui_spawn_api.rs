@@ -165,7 +165,7 @@ fn image(path: &str, x: f32, y: f32, width: f32, height: f32) -> (ComponentData,
     (data, element_view("image", rect, "", false))
 }
 
-/// 生成实体并下发 `Command::Spawn`；返回 `None` 只在游标撞号时（不该发生）。
+/// 生成实体并下发 `Command::Spawn`；游标耗尽或撞号时不修改帧内视图。
 fn spawn_entity(
     view: &View,
     commands: &Commands,
@@ -176,10 +176,11 @@ fn spawn_entity(
     let id = {
         let mut view = view.borrow_mut();
         let id = view.spawn_cursor;
+        EntityId::from_raw(id).validate().ok()?;
         if view.entity(id).is_some() {
             return None;
         }
-        view.spawn_cursor = id.saturating_add(1);
+        view.spawn_cursor = id + 1;
         // 同帧可见：命令还没结算，setter / 焦点按 id 查这份快照。
         view.pending_spawns.insert(
             id,

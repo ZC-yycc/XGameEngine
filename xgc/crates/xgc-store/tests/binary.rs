@@ -42,6 +42,34 @@ fn binary_world_roundtrips_and_is_deterministic() {
 }
 
 #[test]
+fn binary_world_distinguishes_the_final_id_from_the_exhausted_cursor() {
+    use xgc_base::EntityId;
+    use xgc_world::EntityData;
+
+    let data = WorldData {
+        next_id: u64::MAX,
+        entities: vec![EntityData::new(EntityId::from_raw(u64::MAX - 1))],
+        ..Default::default()
+    };
+    let mut bytes = xgc_store::encode_world(&data).unwrap();
+    assert_eq!(xgc_store::decode_world(&bytes).unwrap(), data);
+
+    // 最后一行只有 8 字节 ID、8 字节 revision 和 4 字节组件数。
+    let id_start = bytes.len() - 20;
+    assert_eq!(
+        &bytes[id_start..id_start + 8],
+        &(u64::MAX - 1).to_le_bytes()
+    );
+    bytes[id_start..id_start + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    let error = xgc_store::decode_world(&bytes).unwrap_err();
+    assert!(error.contains(&u64::MAX.to_string()), "{error}");
+
+    let mut invalid = data;
+    invalid.entities[0].id = EntityId::from_raw(u64::MAX);
+    assert_eq!(xgc_store::encode_world(&invalid).unwrap_err(), error);
+}
+
+#[test]
 fn binary_world_rejects_previous_version() {
     let mut bytes = xgc_store::encode_world(&World::new().world_data()).unwrap();
     bytes[4..8].copy_from_slice(&6_u32.to_le_bytes());

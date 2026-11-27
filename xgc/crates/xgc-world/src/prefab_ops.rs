@@ -235,9 +235,6 @@ fn validate_apply_asset(world: &World, prefab: &WorldData, root: EntityId) -> Re
     let mut parents = BTreeMap::new();
     for entity in &prefab.entities {
         world.snapshot_from_data(entity)?;
-        if entity.id.raw() == u64::MAX {
-            return Err("预制体实体 ID 无效".into());
-        }
         let mut parent = None;
         for component in &entity.components {
             match component.component {
@@ -282,9 +279,10 @@ fn map_entities(
         return Err("预制体为空".to_string());
     }
     // Spawn 提交时会推进世界的 ID 分配器，坏计划无需预留 ID。
-    let mut available = world.next_id..u64::MAX;
+    let mut available = world.next_id..=EntityId::MAX_ASSIGNABLE_RAW;
     let mut mapping = BTreeMap::new();
     for entity in &prefab.entities {
+        entity.id.validate().map_err(|error| error.to_string())?;
         let target = match current.get(&entity.id) {
             Some(&id) => id,
             None => available

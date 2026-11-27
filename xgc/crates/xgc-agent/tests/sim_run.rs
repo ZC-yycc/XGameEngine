@@ -152,6 +152,14 @@ fn rejects_invalid_parameters_before_stepping() {
             "id",
         ),
         (
+            json!({"frames": 0, "watch": [{"id": u64::MAX.to_string(), "path": "core.transform:position"}]}),
+            "超出持久 ID 上限",
+        ),
+        (
+            json!({"frames": 0, "watch": [{"id": u64::MAX, "path": "core.transform:position"}]}),
+            "超出持久 ID 上限",
+        ),
+        (
             json!({"frames": 2, "watch": [{"id": "1", "path": "core.transform:absent"}]}),
             "absent",
         ),
@@ -186,6 +194,18 @@ fn rejects_invalid_parameters_before_stepping() {
         json!([{"frame": 0, "state_hash": start["state_hash"]}])
     );
     assert_eq!(preview["watch"], json!([]));
+
+    let last_id = EntityId::MAX_ASSIGNABLE_RAW.to_string();
+    let path = "core.transform:position";
+    let last_id_preview = result(
+        &mut agent,
+        "sim.run",
+        json!({"frames": 0, "watch": [{"id": last_id, "path": path}]}),
+    );
+    assert_eq!(
+        last_id_preview["watch"],
+        json!([{"id": last_id, "path": path, "values": [null]}])
+    );
 
     let bounded = result(
         &mut agent,

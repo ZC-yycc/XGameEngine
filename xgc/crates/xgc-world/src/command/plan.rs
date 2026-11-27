@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use xgc_base::diagnostics as codes;
 use xgc_base::{Diagnostic, EntityId, Subject};
 
-use super::{diag, Command, ComponentId, Plan, Value, World};
+use super::{diag, validate_data_id, Command, ComponentId, Plan, Value, World};
 use crate::field_edit::{is_nested, FieldEditError};
 use crate::EntitySnapshot;
 
@@ -121,6 +121,7 @@ impl Planner<'_> {
             }
             Command::Replace { data } => {
                 let id = data.id;
+                validate_data_id(id)?;
                 // 删除的逆命令可以在本事务内恢复实体，再替换回删除前的内容。
                 if !self.exists(id) {
                     return Err(diag(

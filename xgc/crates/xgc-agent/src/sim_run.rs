@@ -161,8 +161,11 @@ fn parse_watch(agent: &Agent, watch: Option<&Json>, samples: usize) -> Result<Ve
             {
                 return Err(format!("watch 条目不支持字段 {key}"));
             }
+            let id = EntityId::from_raw(required_u64(item, "id")?);
+            id.validate()
+                .map_err(|err| format!("watch id 无效：{err}"))?;
             Ok(Watch {
-                id: EntityId::from_raw(required_u64(item, "id")?),
+                id,
                 field: agent.resolve_field(required_str(item, "path")?)?,
                 values: Vec::with_capacity(samples),
             })

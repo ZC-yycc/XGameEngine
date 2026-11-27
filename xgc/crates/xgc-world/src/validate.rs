@@ -19,6 +19,13 @@ impl World {
         let mut entity_ids = HashSet::new();
 
         for entity in &data.entities {
+            if let Err(error) = entity.id.validate() {
+                diagnostics.push(diag(
+                    codes::WORLD_INVALID_ENTITY_ID,
+                    entity.id,
+                    error.to_string(),
+                ));
+            }
             if !entity_ids.insert(entity.id) {
                 diagnostics.push(diag(
                     codes::WORLD_DUP_ENTITY,

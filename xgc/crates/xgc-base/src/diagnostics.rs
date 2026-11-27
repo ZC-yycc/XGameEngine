@@ -16,6 +16,7 @@ pub const EDIT_APPLY_FAILED: &str = "EDIT.APPLY_FAILED";
 pub const EDIT_REVERT_FAILED: &str = "EDIT.REVERT_FAILED";
 pub const EDIT_REVISION_CONFLICT: &str = "EDIT.REVISION_CONFLICT";
 
+pub const WORLD_INVALID_ENTITY_ID: &str = "WORLD.INVALID_ENTITY_ID";
 pub const WORLD_DUP_ENTITY: &str = "WORLD.DUP_ENTITY";
 pub const WORLD_DUP_COMPONENT: &str = "WORLD.DUP_COMPONENT";
 pub const WORLD_UNKNOWN_COMPONENT: &str = "WORLD.UNKNOWN_COMPONENT";
@@ -60,7 +61,7 @@ pub const CATALOG: &[DiagnosticCode] = &[
     },
     DiagnosticCode {
         code: EDIT_INVALID_SPAWN,
-        summary: "spawn 数据不合法",
+        summary: "spawn / replace 的实体数据不合法",
     },
     DiagnosticCode {
         code: EDIT_ENTITY_DEAD_IN_PLAN,
@@ -93,6 +94,10 @@ pub const CATALOG: &[DiagnosticCode] = &[
     DiagnosticCode {
         code: EDIT_REVISION_CONFLICT,
         summary: "计划基于的 revision 与当前世界不一致",
+    },
+    DiagnosticCode {
+        code: WORLD_INVALID_ENTITY_ID,
+        summary: "WorldData 中的实体 ID 超出持久身份上限",
     },
     DiagnosticCode {
         code: WORLD_DUP_ENTITY,

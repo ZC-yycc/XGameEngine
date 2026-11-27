@@ -343,7 +343,10 @@ impl World {
         self.environment = environment;
     }
 
+    /// 分配新实体。持久 ID 耗尽时在修改世界前 panic。
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> EntityKey {
+        let id = EntityId::from_raw(self.next_id);
+        id.validate().expect("分配实体 ID 失败：游标已耗尽");
         let mut ids = B::component_ids();
         ids.sort_by_key(|id| id.0);
         let mut unique = ids.clone();
@@ -352,8 +355,7 @@ impl World {
 
         let archetype = self.archetype_for(&ids);
         let key = self.alloc_key();
-        let id = EntityId::from_raw(self.next_id);
-        self.next_id += 1;
+        self.next_id = id.raw() + 1;
         self.by_id.insert(id, key);
 
         let arch = &mut self.archetypes[archetype as usize];
@@ -465,10 +467,13 @@ impl World {
         self.by_id.len()
     }
 
-    /// 预留一段连续实体 ID（预制体实例化用），返回起始值。
+    /// 预留一段连续实体 ID，返回起始值。空间不足时在移动游标前 panic。
     pub fn reserve_entity_ids(&mut self, count: u64) -> u64 {
         let start = self.next_id;
-        self.next_id = self.next_id.saturating_add(count);
+        // 结果是区间的排他上界。上界可为 u64::MAX，区间内的 ID 仍然合法。
+        self.next_id = start
+            .checked_add(count)
+            .expect("预留实体 ID 失败：剩余 ID 不足");
         start
     }
 
