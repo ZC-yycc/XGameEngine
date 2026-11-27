@@ -43,7 +43,7 @@ impl Method {
     }
 }
 
-pub(super) static METHODS: [Method; 20] = [
+pub(super) static METHODS: &[Method] = &[
     Method::new(
         "engine.describe",
         "查看协议版本、方法、组件与能力目录，以及当前世界的摘要。",
@@ -160,9 +160,15 @@ pub(super) static METHODS: [Method; 20] = [
     ),
     Method::new(
         "sim.run",
-        "从当前世界的独立副本预览固定步，返回逐帧哈希与指定字段。",
+        "从当前世界的独立副本预览固定步，返回逐帧哈希与指定字段。可选择记录以供回放。",
         schemas::sim_run,
-        |agent, params| sim_run::run(agent, params),
+        sim_run::run,
+    ),
+    Method::new(
+        "sim.replay",
+        "从当前连接的记录起点重新跑固定步，返回首个哈希分歧和该帧采样字段差异。项目资产按当前文件读取。",
+        schemas::sim_replay,
+        |agent, params| sim_run::replay(agent, params),
     ),
 ];
 

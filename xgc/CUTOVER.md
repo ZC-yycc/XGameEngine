@@ -94,6 +94,8 @@ HUD 图片按项目相对路径或 GUID 从同一资产目录读取。GPU 回归
 
 `sim.run` 与 MCP 的 `sim_run` 从编辑世界的副本预览最多 300 个固定步，返回第 0 帧起的哈希和最多 16 个实体字段的采样值。指定原生项目目录或清单时走共享脚本宿主，从项目解析 GUID 与搜索根。省略时只执行模拟系统。预览成功或失败后，编辑快照、查询游标、待应用计划和事务历史仍可继续使用。[预览回归](crates/xgc-agent/tests/sim_run.rs) · [MCP 进程回归](crates/xgc-cli/tests/mcp_sim_run.rs)
 
+传入 `record: true` 可取得 `trace_id`。`sim.replay` 与 MCP 的 `sim_replay` 从该记录的世界和固定步长重跑，项目资产按回放时的文件重新读取。每条连接保留最近一次成功记录。回放在首个哈希分歧处停止，返回帧号、期望和实测哈希以及有变化的采样字段。实际 MCP 进程回归把一段已跑过的 Lua 改为从第 2 帧起偏移位置，回放报告该帧的 X 坐标由 2 变为 11。第 3 帧故意抛错，回放到第 2 帧已结束。编辑快照逐字段一致，JSON-RPC 回归另验证编辑世界继续修改后仍能重放已记录的起点。[MCP 进程回归](crates/xgc-cli/tests/mcp_sim_run.rs) · [记录生命周期回归](crates/xgc-agent/tests/sim_run.rs)
+
 `world.explain` 与 MCP 的 `world_explain` 共用渲染器的模型抽取判据。给定相机实体或眼点时返回选中的模型，或报告缺少组件、全局变换、模型引用以及超出有限 LOD 距离等排除原因。结果覆盖资产加载前的抽取阶段。[诊断回归](crates/xgc-agent/tests/explain.rs)
 
 `script.check` 及 MCP 的 `script_check` 接受内联 Lua 源码，`xgc script-check <脚本.lua>` 读取单文件。这两个入口和项目体检都调用运行时的 Lua 5.4 文本编译器，语法错误为 `SCRIPT.COMPILE`，包含可确定的脚本名与行号。检查不执行脚本。 [脚本检查回归](crates/xgc-agent/tests/script_check.rs)

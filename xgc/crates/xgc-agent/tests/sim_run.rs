@@ -118,8 +118,33 @@ fn previews_each_checkpoint_and_preserves_the_edit_session() {
         json!({"cursor": first_page["next_cursor"], "limit": 1}),
     );
     assert_eq!(second_page["entities"][0]["id"], PROBED_ID.to_string());
+    let recorded = result(
+        &mut agent,
+        "sim.run",
+        json!({"frames": 2, "dt": 0.25, "record": true}),
+    );
+    let trace = json!({"trace_id": recorded["trace_id"]});
     result(&mut agent, "edit.apply", json!({"plan_id": pending_plan}));
+    let failed = call(
+        &mut agent,
+        "sim.run",
+        json!({"frames": 0, "record": "true"}),
+    );
+    assert_eq!(failed["error"]["code"], -32000);
+    assert!(failed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("record"));
+    let matched = result(&mut agent, "sim.replay", trace.clone());
+    assert_eq!(matched["matched"], true);
+    assert_eq!(matched["frames_run"], 2);
     assert_eq!(result(&mut agent, "engine.history", Json::Null)["count"], 2);
+    let next = result(&mut agent, "sim.run", json!({"frames": 0, "record": true}));
+    assert_ne!(next["trace_id"], recorded["trace_id"]);
+    assert_eq!(
+        call(&mut agent, "sim.replay", trace)["error"]["code"],
+        -32000
+    );
     result(&mut agent, "edit.undo", Json::Null);
     assert_eq!(
         result(&mut agent, "world.digest", Json::Null)["state_hash"],

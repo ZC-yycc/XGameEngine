@@ -63,6 +63,7 @@ fn tools_list_exposes_every_agent_method() {
         "script.check",
         "world.explain",
         "sim.run",
+        "sim.replay",
     ];
     assert_eq!(description["methods"], json!(methods));
     let details = description["method_details"].as_array().unwrap();
@@ -155,6 +156,10 @@ fn tools_advertise_their_actual_inputs() {
     assert_eq!(apply["base_revision"]["oneOf"][0]["type"], "integer");
     assert_eq!(apply["base_revision"]["oneOf"][1]["type"], "string");
     assert_eq!(apply["base_revision"]["oneOf"][2]["type"], "null");
+
+    assert_eq!(schema("sim_run")["properties"]["record"]["default"], false);
+    assert_eq!(schema("sim_replay")["required"], json!(["trace_id"]));
+    assert_eq!(schema("sim_replay")["additionalProperties"], false);
 
     let script = &schema("script_check")["properties"];
     assert_eq!(script["source"]["type"], "string");

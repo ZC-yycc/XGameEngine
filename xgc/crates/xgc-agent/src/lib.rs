@@ -44,6 +44,8 @@ pub struct Agent {
     journal: Journal,
     base: WorldSnapshot,
     next_plan: u64,
+    recorded_preview: Option<sim_run::RecordedPreview>,
+    next_trace: u64,
 }
 
 impl Default for Agent {
@@ -67,6 +69,8 @@ impl Agent {
             journal: Journal::new(),
             base,
             next_plan: 0,
+            recorded_preview: None,
+            next_trace: 0,
         }
     }
 

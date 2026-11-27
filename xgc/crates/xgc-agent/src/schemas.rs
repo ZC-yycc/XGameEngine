@@ -174,9 +174,20 @@ pub(super) fn sim_run() -> Json {
             "project": {"type": "string", "minLength": 1,
                         "description": "服务端原生项目目录或 project.xgc 路径。省略时只跑无资产系统。"},
             "watch": {"type": "array", "maxItems": MAX_WATCHES, "items": watch,
-                      "description": "从第 0 帧起采样的实体字段，缺失值为 null。"}
+                      "description": "从第 0 帧起采样的实体字段，缺失值为 null。"},
+            "record": {"type": "boolean", "default": false,
+                       "description": "成功后返回 trace_id，并替换本连接上一次成功记录。"}
         }),
         &["frames"],
+    );
+    schema["additionalProperties"] = json!(false);
+    schema
+}
+
+pub(super) fn sim_replay() -> Json {
+    let mut schema = required_param(
+        "trace_id",
+        json!({"type": "string", "description": "本连接 sim.run 返回的记录 ID。"}),
     );
     schema["additionalProperties"] = json!(false);
     schema

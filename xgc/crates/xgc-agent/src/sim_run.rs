@@ -1,13 +1,13 @@
 //! 固定步预览只消费编辑世界的数据副本，宿主与派生缓存每次重新构建。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as Json};
 use xgc_base::EntityId;
 use xgc_host::{asset_paths, ScriptedRunner};
 use xgc_sim::Simulation;
 use xgc_store::ProjectSession;
-use xgc_world::World;
+use xgc_world::{World, WorldData};
 
 use crate::{query::FieldRef, required_str, required_u64, Agent};
 
@@ -16,14 +16,26 @@ pub(super) const MAX_WATCHES: usize = 16;
 pub(super) const MIN_DT: f64 = 1.0 / 240.0;
 pub(super) const MAX_DT: f64 = 1.0;
 
-pub(super) fn run(agent: &Agent, params: &Json) -> Result<Json, String> {
+/// 显式记录的起点和逐帧观察。连接只保留最近一次成功记录。
+pub(super) struct RecordedPreview {
+    id: String,
+    initial: WorldData,
+    dt: Option<f32>,
+    project: Option<PathBuf>,
+    hashes: Vec<u64>,
+    watch: Vec<Watch>,
+}
+
+pub(super) fn run(agent: &mut Agent, params: &Json) -> Result<Json, String> {
     let params = params
         .as_object()
         .ok_or_else(|| "sim.run 参数必须是包含 frames 的对象".to_string())?;
-    if let Some(key) = params
-        .keys()
-        .find(|key| !matches!(key.as_str(), "frames" | "dt" | "project" | "watch"))
-    {
+    if let Some(key) = params.keys().find(|key| {
+        !matches!(
+            key.as_str(),
+            "frames" | "dt" | "project" | "watch" | "record"
+        )
+    }) {
         return Err(format!("sim.run 不支持参数 {key}"));
     }
     let frames = params
@@ -33,37 +45,81 @@ pub(super) fn run(agent: &Agent, params: &Json) -> Result<Json, String> {
         .ok_or_else(|| format!("frames 必须是 0 到 {MAX_FRAMES} 之间的整数"))?;
     let dt = params.get("dt").map(parse_dt).transpose()?;
     let project = params.get("project").map(parse_project).transpose()?;
+    let record = match params.get("record") {
+        Some(value) => value.as_bool().ok_or("record 必须是布尔值")?,
+        None => false,
+    };
     let samples = frames as usize + 1;
     let mut watch = parse_watch(agent, params.get("watch"), samples)?;
-
-    let data = agent.world().world_data();
-    let mut world = World::new();
-    world
-        .restore_world_data(&data)
-        .map_err(|err| format!("无法创建预览世界：{err}"))?;
-    let simulation = match dt {
-        Some(dt) => Simulation::with_fixed_dt(world, dt),
-        None => Simulation::new(world),
-    };
-    let mut preview = Preview::new(simulation, project)?;
-
-    let mut state_hash = String::new();
-    let mut checkpoints = Vec::with_capacity(samples);
+    let initial = agent.world().world_data();
+    let mut preview = Preview::new(&initial, dt, project)?;
+    let mut hashes = Vec::with_capacity(samples);
     for frame in 0..=frames {
-        if frame > 0 {
-            preview.step()?;
-        }
-        let world = preview.world();
-        state_hash = format!("{:016x}", world.state_hash());
-        checkpoints.push(json!({"frame": frame, "state_hash": state_hash}));
+        hashes.push(preview.frame_hash(frame)?);
         for watch in &mut watch {
-            watch.sample(world)?;
+            let value = watch.read(preview.world())?;
+            watch.values.push(value);
         }
     }
-    let watch: Vec<_> = watch.into_iter().map(Watch::into_json).collect();
-    Ok(
-        json!({"frames_run": frames, "state_hash": state_hash, "checkpoints": checkpoints, "watch": watch}),
-    )
+    let checkpoints: Vec<_> = hashes
+        .iter()
+        .enumerate()
+        .map(|(frame, hash)| json!({"frame": frame, "state_hash": format!("{hash:016x}")}))
+        .collect();
+    let observations: Vec<_> = watch.iter().map(Watch::json).collect();
+    let mut result =
+        json!({"frames_run": frames, "state_hash": checkpoints[frames as usize]["state_hash"]});
+    result["checkpoints"] = Json::Array(checkpoints);
+    result["watch"] = Json::Array(observations);
+    if record {
+        let id = format!("tr-{}", agent.next_trace);
+        agent.next_trace = agent.next_trace.checked_add(1).ok_or("记录编号已用尽")?;
+        result["trace_id"] = json!(id);
+        agent.recorded_preview = Some(RecordedPreview {
+            id,
+            initial,
+            dt,
+            project: project.map(Path::to_path_buf),
+            hashes,
+            watch,
+        });
+    }
+    Ok(result)
+}
+
+pub(super) fn replay(agent: &Agent, params: &Json) -> Result<Json, String> {
+    let id = required_str(params, "trace_id")?;
+    if params.as_object().is_some_and(|params| params.len() != 1) {
+        return Err("sim.replay 只接受 trace_id 参数".into());
+    }
+    let trace = agent
+        .recorded_preview
+        .as_ref()
+        .filter(|trace| trace.id == id)
+        .ok_or_else(|| format!("当前连接找不到记录 {id}"))?;
+    let mut preview = Preview::new(&trace.initial, trace.dt, trace.project.as_deref())?;
+    for (frame, &expected_hash) in trace.hashes.iter().enumerate() {
+        let actual_hash = preview.frame_hash(frame as u64)?;
+        if actual_hash == expected_hash {
+            continue;
+        }
+        let mut diff = Vec::new();
+        for watch in &trace.watch {
+            let actual = watch.read(preview.world())?;
+            let expected = &watch.values[frame];
+            if &actual != expected {
+                diff.push(json!({"id": watch.id, "path": watch.field.label, "expected": expected, "actual": actual}));
+            }
+        }
+        return Ok(json!({
+            "trace_id": id, "matched": false, "frames_run": frame,
+            "first_divergence": {"frame": frame, "expected_hash": format!("{expected_hash:016x}"),
+                                 "actual_hash": format!("{actual_hash:016x}"), "watch": diff}
+        }));
+    }
+    Ok(json!({
+        "trace_id": id, "matched": true, "frames_run": trace.hashes.len() - 1, "first_divergence": null
+    }))
 }
 
 fn parse_dt(value: &Json) -> Result<f32, String> {
@@ -88,7 +144,15 @@ enum Preview {
 }
 
 impl Preview {
-    fn new(simulation: Simulation, project: Option<&Path>) -> Result<Self, String> {
+    fn new(initial: &WorldData, dt: Option<f32>, project: Option<&Path>) -> Result<Self, String> {
+        let mut world = World::new();
+        world
+            .restore_world_data(initial)
+            .map_err(|err| format!("无法创建预览世界：{err}"))?;
+        let simulation = match dt {
+            Some(dt) => Simulation::with_fixed_dt(world, dt),
+            None => Simulation::new(world),
+        };
         let Some(path) = project else {
             // 无项目时连脚本宿主也不创建，场景中的相对引用不会读到工作目录。
             return Ok(Self::Systems(Box::new(simulation)));
@@ -107,14 +171,16 @@ impl Preview {
         }
     }
 
-    fn step(&mut self) -> Result<(), String> {
-        match self {
-            Self::Systems(simulation) => simulation
-                .advance_with(Vec::new(), |_| {})
-                .map_err(|err| format!("预览步进失败：{err:?}")),
-            Self::Project(runner) => runner.step(),
+    fn frame_hash(&mut self, frame: u64) -> Result<u64, String> {
+        if frame > 0 {
+            match self {
+                Self::Systems(simulation) => simulation
+                    .advance_with(Vec::new(), |_| {})
+                    .map_err(|err| format!("预览步进失败：{err:?}")),
+                Self::Project(runner) => runner.step(),
+            }?;
         }
-        .map(|_| ())
+        Ok(self.world().state_hash())
     }
 }
 
@@ -125,18 +191,15 @@ struct Watch {
 }
 
 impl Watch {
-    fn sample(&mut self, world: &World) -> Result<(), String> {
-        let value = self
-            .field
-            .read(world, self.id, |value| serde_json::to_value(value));
-        let value = value
+    fn read(&self, world: &World) -> Result<Json, String> {
+        self.field
+            .read(world, self.id, |value| serde_json::to_value(value))
             .transpose()
-            .map_err(|err| format!("watch {} 序列化失败：{err}", self.field.label))?;
-        self.values.push(value.unwrap_or(Json::Null));
-        Ok(())
+            .map(|value| value.unwrap_or(Json::Null))
+            .map_err(|err| format!("watch {} 序列化失败：{err}", self.field.label))
     }
 
-    fn into_json(self) -> Json {
+    fn json(&self) -> Json {
         json!({"id": self.id, "path": self.field.label, "values": self.values})
     }
 }

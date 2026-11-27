@@ -1,7 +1,7 @@
 //! 真正的 MCP stdio 会话同时验证脚本边界、逐行输出和项目宿主预览。
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -200,6 +200,123 @@ fn sim_preview_runs_in_real_mcp_stdio_without_leaking_script_output() {
         assert!(stderr.contains(expected), "{stderr}");
     }
     assert!(!stderr.contains("unexpected cwd script"), "{stderr}");
+}
+
+#[test]
+fn replay_reports_the_first_actual_script_divergence_in_mcp() {
+    let scratch = Scratch::new();
+    let baseline = r#"
+        local ticks = 0
+        function update(ctx)
+            ticks = ticks + 1
+            set_pos(ctx, ticks, 0, 0)
+        end
+    "#;
+    let changed = r#"
+        local ticks = 0
+        function update(ctx)
+            ticks = ticks + 1
+            if ticks >= 2 then set_pos(ctx, ticks + 9, 0, 0)
+            else set_pos(ctx, ticks, 0, 0) end
+            if ticks >= 3 then error('replay ran past the first divergence') end
+        end
+    "#;
+    project(&scratch.0, baseline);
+    let mut world = World::new();
+    let key = world.spawn((
+        Transform::default(),
+        Script {
+            paths: vec!["Scripts/first.lua".into()],
+        },
+    ));
+    let id = world.entity(key).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_xgc"))
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut call = |request: Json| -> Json {
+        writeln!(stdin, "{request}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        assert_ne!(stdout.read_line(&mut line).unwrap(), 0);
+        let response: Json = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], request["id"], "{response}");
+        response
+    };
+    let result = || {
+        let handshake = call(request(
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-06-18"}),
+        ));
+        assert_eq!(handshake["result"]["protocolVersion"], "2025-06-18");
+        tool_result(&call(tool(
+            2,
+            "world_restore",
+            json!({"data": world.world_data()}),
+        )));
+        let before = tool_result(&call(tool(3, "world_snapshot", json!({}))));
+        let recorded = tool_result(&call(tool(
+            4,
+            "sim_run",
+            json!({
+                "frames": 3, "record": true, "project": scratch.0,
+                "watch": [{"id": id, "path": "core.transform:position"}]
+            }),
+        )));
+        assert_eq!(
+            recorded["watch"][0]["values"],
+            json!([vec3(0.0), vec3(1.0), vec3(2.0), vec3(3.0)])
+        );
+        let replay_args = json!({"trace_id": recorded["trace_id"]});
+        let matched = tool_result(&call(tool(5, "sim_replay", replay_args.clone())));
+        assert_eq!(matched["matched"], true);
+        assert_eq!(matched["frames_run"], 3);
+        assert_eq!(matched["first_divergence"], Json::Null);
+        fs::write(scratch.0.join("Fallback/Scripts/first.lua"), changed).unwrap();
+        let control = tool_result(&call(tool(
+            6,
+            "sim_run",
+            json!({
+                "frames": 2, "project": scratch.0,
+                "watch": [{"id": id, "path": "core.transform:position"}]
+            }),
+        )));
+        assert_eq!(control["checkpoints"][1], recorded["checkpoints"][1]);
+        assert_ne!(control["checkpoints"][2], recorded["checkpoints"][2]);
+        let diverged = tool_result(&call(tool(7, "sim_replay", replay_args)));
+        assert_eq!(diverged["matched"], false);
+        assert_eq!(diverged["frames_run"], 2);
+        assert_eq!(
+            diverged["first_divergence"],
+            json!({
+                "frame": 2,
+                "expected_hash": recorded["checkpoints"][2]["state_hash"],
+                "actual_hash": control["checkpoints"][2]["state_hash"],
+                "watch": [{"id": id, "path": "core.transform:position", "expected": vec3(2.0), "actual": vec3(11.0)}]
+            })
+        );
+        assert_eq!(
+            tool_result(&call(tool(8, "world_snapshot", json!({})))),
+            before
+        );
+    };
+    // 断言失败也要关闭 stdin，避免失败用例在 Windows 锁住 xgc.exe。
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(result));
+    drop(stdin);
+    drop(stdout);
+    let output = child.wait_with_output().unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 fn vec3(x: f32) -> Json {
