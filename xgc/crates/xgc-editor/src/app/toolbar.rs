@@ -24,10 +24,12 @@ impl EditorApp {
             .add_enabled(!self.state.is_playing(), egui::Button::new("Play"))
             .clicked()
         {
+            self.next_script_scan = None;
             self.status = Some(match self.state.play() {
                 Ok(()) => "Play".to_string(),
                 Err(err) => err,
             });
+            self.poll_play_scripts(ui.ctx(), std::time::Instant::now());
         }
         if self.state.is_paused() {
             if ui.button("Resume").clicked() {

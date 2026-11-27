@@ -374,6 +374,54 @@ fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() 
 }
 
 #[test]
+fn changed_mounts_retry_together_and_keep_untouched_module_locals() {
+    let scripts = Scripts::new("poll_reload");
+    let append = |label: &str| {
+        format!(
+            "function update(ctx) local id = self_id(ctx); \
+             ui_set_text(ctx, id, ui_text(ctx, id) .. '{label}') end"
+        )
+    };
+    scripts.write("a.lua", &append("a"));
+    scripts.write("b.lua", &append("b"));
+    scripts.write(
+        "counter.lua",
+        r#"
+        local count = 0
+        function update(ctx)
+            count = count + 1
+            local id = self_id(ctx)
+            ui_set_text(ctx, id, ui_text(ctx, id) .. tostring(count))
+        end
+        "#,
+    );
+    let mut world = World::new();
+    let entity = world.spawn((
+        UiElement::default(),
+        mounts(&["a.lua", "b.lua", "counter.lua"]),
+    ));
+    let mut runtime = scripts.runtime();
+    step(&mut runtime, &mut world);
+    assert_eq!(runtime.poll_reload(), Ok(0));
+
+    scripts.write("a.lua", &append("first"));
+    std::fs::remove_file(scripts.0.join("b.lua")).unwrap();
+    assert!(runtime.poll_reload().unwrap_err().contains("b.lua"));
+    assert_eq!(runtime.poll_reload(), Ok(0));
+    step(&mut runtime, &mut world);
+    assert_eq!(world.get::<UiElement>(entity).unwrap().text, "ab1ab2");
+
+    scripts.write("b.lua", &append("second"));
+    assert_eq!(runtime.poll_reload(), Ok(2));
+    assert_eq!(runtime.poll_reload(), Ok(0));
+    step(&mut runtime, &mut world);
+    assert_eq!(
+        world.get::<UiElement>(entity).unwrap().text,
+        "ab1ab2firstsecond3"
+    );
+}
+
+#[test]
 fn failed_mount_does_not_overwrite_the_other_mounts_commands() {
     let scripts = Scripts::new("failed_mount");
     scripts.write("first.lua", "ui_set_text(nil, self_id(nil), 'ready')");

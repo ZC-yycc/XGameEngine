@@ -127,6 +127,11 @@ impl ScriptedRunner {
         self.runtime.script_count()
     }
 
+    /// 编辑器在运行步之间检查已挂载的脚本，模拟帧本身不轮询磁盘。
+    pub fn poll_script_reload(&mut self) -> Result<usize, String> {
+        self.runtime.poll_reload()
+    }
+
     /// 无窗口输入可在零个或多个固定步之间提交状态快照。
     pub fn apply_input(&mut self, map: &InputMap, state: &InputState) {
         self.input_edges.clear();

@@ -86,6 +86,13 @@ impl EditorState {
             .map_or(0, |session| session.runner.script_count())
     }
 
+    pub(crate) fn poll_script_reload(&mut self) -> Result<usize, String> {
+        match &mut self.play {
+            Some(session) => session.runner.poll_script_reload(),
+            None => Ok(0),
+        }
+    }
+
     pub fn is_paused(&self) -> bool {
         self.play.as_ref().is_some_and(|session| session.paused)
     }

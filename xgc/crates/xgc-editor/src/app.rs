@@ -9,6 +9,8 @@ mod toolbar;
 
 #[cfg(test)]
 mod hud_tests;
+#[cfg(test)]
+mod reload_tests;
 
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
@@ -68,6 +70,7 @@ pub struct EditorApp {
     prefab_path: String,
     prefab_position: [f32; 3],
     last_play_update: Option<Instant>,
+    next_script_scan: Option<Instant>,
     play_input: WindowInput,
     play_audio: WindowAudio,
     assets: Option<Vec<AssetEntry>>,
@@ -93,6 +96,7 @@ impl EditorApp {
             prefab_path: String::new(),
             prefab_position: [0.0; 3],
             last_play_update: None,
+            next_script_scan: None,
             play_input: WindowInput::default(),
             play_audio: WindowAudio::default(),
             assets: None,
@@ -358,6 +362,32 @@ impl EditorApp {
             }
         });
     }
+    fn poll_play_scripts(&mut self, ctx: &egui::Context, now: Instant) {
+        const INTERVAL: Duration = Duration::from_secs(1);
+        if !self.state.is_playing() {
+            self.next_script_scan = None;
+            return;
+        }
+        let next = *self.next_script_scan.get_or_insert(now + INTERVAL);
+        if now < next {
+            ctx.request_repaint_after(next - now);
+            return;
+        }
+        self.next_script_scan = Some(now + INTERVAL);
+        match self.state.poll_script_reload() {
+            Ok(0) => {}
+            Ok(count) => {
+                self.status = Some(format!("已重载 {count} 个脚本挂载"));
+                ctx.request_repaint();
+            }
+            Err(err) => {
+                self.status = Some(format!("脚本重载失败：{err}"));
+                ctx.request_repaint();
+            }
+        }
+        ctx.request_repaint_after(INTERVAL);
+    }
+
     fn tick_play(&mut self, ctx: &egui::Context, now: Instant, viewport: Option<egui::Rect>) {
         if !self.state.is_playing() {
             if self.last_play_update.take().is_some() {
@@ -427,6 +457,9 @@ impl eframe::App for EditorApp {
                 Err(err) => err,
             });
         }
+        let now = Instant::now();
+        // 工具栏可以执行暂停单步，先处理到期的脚本修改再画按钮。
+        self.poll_play_scripts(ctx, now);
         egui::TopBottomPanel::top("xgc-toolbar").show(ctx, |ui| self.toolbar(ui));
         if let Some(render_state) = frame.wgpu_render_state() {
             self.ensure_viewport(render_state);
@@ -470,7 +503,7 @@ impl eframe::App for EditorApp {
                 .viewport
                 .as_ref()
                 .and_then(|viewport| fit_viewport(ui.available_rect_before_wrap(), viewport.size));
-            self.tick_play(ctx, Instant::now(), image_rect);
+            self.tick_play(ctx, now, image_rect);
             self.render_viewport();
             let Some(viewport) = &self.viewport else {
                 ui.label("没有 wgpu 渲染后端，视口不可用");

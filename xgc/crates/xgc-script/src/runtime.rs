@@ -2,8 +2,11 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::fs::{self, Metadata};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use xgc_asset::{AssetCatalog, AssetPaths, SearchPaths};
 use xgc_base::{EntityId, EntityKey};
@@ -13,9 +16,26 @@ use crate::legacy::Commands;
 use crate::view::{EntityView, ScriptView};
 use crate::LuaHost;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl From<Metadata> for SourceStamp {
+    fn from(metadata: Metadata) -> Self {
+        Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        }
+    }
+}
+
 struct MountedVm {
     host: LuaHost,
     source: PathBuf,
+    active: Option<SourceStamp>,
+    observed: Option<SourceStamp>,
 }
 
 struct Mount {
@@ -24,10 +44,6 @@ struct Mount {
 }
 
 impl Mount {
-    fn error(&self, entity: EntityId, err: String) -> String {
-        format!("脚本 {} 实体 {entity}：{err}", self.path)
-    }
-
     fn dispatch(
         &self,
         entity: EntityId,
@@ -36,7 +52,7 @@ impl Mount {
     ) {
         if let Some(vm) = &self.vm {
             if let Err(err) = hook(&vm.host) {
-                note_error(frame_error, self.error(entity, err));
+                note_error(frame_error, mount_error(&self.path, entity, err));
             }
         }
     }
@@ -91,7 +107,7 @@ impl EntityScripts {
             }
             match load_mount(assets, view, entity, &mount.path, &self.commands) {
                 Ok(vm) => mount.vm = Some(vm),
-                Err(err) => note_error(error, mount.error(entity, err)),
+                Err(err) => note_error(error, mount_error(&mount.path, entity, err)),
             }
         }
     }
@@ -288,27 +304,59 @@ impl ScriptRuntime {
 
     /// 重新读取所有挂载。候选模块均通过初始化后再替换活动代码，运行期状态留在原 VM。
     pub fn reload_all(&mut self) -> Result<(), String> {
+        self.reload_modules(false).map(|_| ())
+    }
+
+    /// 仅由编辑器定时调用。失败后记住已看到的版本，下次保存时连同积压的修改一起重试。
+    pub fn poll_reload(&mut self) -> Result<usize, String> {
+        let mut changed = false;
+        for vm in self
+            .entries
+            .values_mut()
+            .flat_map(|scripts| &mut scripts.mounts)
+            .filter_map(|mount| mount.vm.as_mut())
+        {
+            let current = fs::metadata(&vm.source)
+                .ok()
+                .filter(Metadata::is_file)
+                .map(SourceStamp::from);
+            changed |= vm.observed != current;
+            vm.observed = current;
+        }
+        if changed {
+            self.reload_modules(true)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn reload_modules(&mut self, changed_only: bool) -> Result<usize, String> {
         let mut modules = Vec::new();
-        for (&entity, scripts) in &self.entries {
-            for mount in &scripts.mounts {
-                let Some(vm) = &mount.vm else {
+        for (&entity, scripts) in &mut self.entries {
+            for Mount { path, vm } in &mut scripts.mounts {
+                let Some(vm) = vm else {
                     continue;
                 };
-                let source = std::fs::read_to_string(&vm.source).map_err(|err| {
-                    mount.error(entity, format!("读取 {} 失败：{err}", vm.source.display()))
-                })?;
-                // 初始化用来构造模块；显式重载不能在步与步之间写实体或播放音频。
+                if changed_only && vm.active == vm.observed {
+                    continue;
+                }
+                let (source, stamp) =
+                    read_source(&vm.source).map_err(|err| mount_error(path, entity, err))?;
+                // 初始化用来构造模块，不能在步与步之间写实体或播放音频。
                 let module = initialize(&self.view, &scripts.commands, false, || {
-                    vm.host.prepare_module(&mount.path, &source)
+                    vm.host.prepare_module(path, &source)
                 })
-                .map_err(|err| mount.error(entity, err))?;
-                modules.push((&vm.host, module));
+                .map_err(|err| mount_error(path, entity, err))?;
+                modules.push((vm, module, stamp));
             }
         }
-        for (host, module) in modules {
-            host.commit_module(module);
+        let count = modules.len();
+        for (vm, module, stamp) in modules {
+            vm.host.commit_module(module);
+            vm.active = stamp;
+            vm.observed = stamp;
         }
-        Ok(())
+        Ok(count)
     }
 
     pub fn entity_count(&self) -> usize {
@@ -387,14 +435,29 @@ fn load_mount(
     commands: &Commands,
 ) -> Result<MountedVm, String> {
     let resolved = assets.resolve(path).map_err(|err| err.to_string())?;
-    let source = std::fs::read_to_string(&resolved)
-        .map_err(|err| format!("读取 {} 失败：{err}", resolved.display()))?;
+    let (source, stamp) = read_source(&resolved)?;
     let host = LuaHost::with_commands_and_view(Rc::clone(commands), Rc::clone(view), entity.raw())?;
     initialize(view, commands, true, || host.load_script(path, &source))?;
     Ok(MountedVm {
         host,
         source: resolved,
+        active: stamp,
+        observed: stamp,
     })
+}
+
+fn read_source(path: &Path) -> Result<(String, Option<SourceStamp>), String> {
+    let error = |err| format!("读取 {} 失败：{err}", path.display());
+    let mut file = fs::File::open(path).map_err(error)?;
+    // 先取已打开文件的版本。外部原子替换后，旧内容不能被标记成新路径上的版本。
+    let stamp = file.metadata().ok().map(SourceStamp::from);
+    let mut source = String::new();
+    file.read_to_string(&mut source).map_err(error)?;
+    Ok((source, stamp))
+}
+
+fn mount_error(path: &str, entity: EntityId, err: String) -> String {
+    format!("脚本 {path} 实体 {entity}：{err}")
 }
 
 fn initialize<T>(
