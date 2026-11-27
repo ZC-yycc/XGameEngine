@@ -445,9 +445,8 @@ fn register_script_state(lua: &Lua, view: &View, self_id: u64) -> Result<(), Str
     globals
         .set(
             "log",
-            lua.create_function(|_, (_ctx, message): (mlua::Value, String)| {
-                println!("[lua] {message}");
-                Ok(())
+            lua.create_function(|lua, (_ctx, message): (mlua::Value, mlua::String)| {
+                crate::sandbox::log(lua, message)
             })
             .map_err(|err| err.to_string())?,
         )

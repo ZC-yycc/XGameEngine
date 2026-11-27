@@ -263,6 +263,43 @@ fn trace_with_assets_root_runs_the_scripts() {
 }
 
 #[test]
+fn lua_diagnostics_leave_the_frame_trace_on_stdout() {
+    let (path, assets) = scripted_world_with(
+        "diagnostics",
+        r#"
+        function update(ctx)
+            print('fixture print', 7, nil)
+            log(ctx, 'fixture legacy log')
+            xgc.log('fixture xgc log')
+            warn('@on')
+            warn('fixture ', 'warning')
+            warn('@off')
+            warn('disabled warning')
+            set_pos(ctx, 5, 0, 0)
+        end
+        "#,
+    );
+    let output = trace_with_assets(&path, "1", &assets);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{diagnostics}");
+    assert!(!diagnostics.contains("disabled warning"));
+    let lines = stdout_lines(&output);
+    assert_eq!(lines.len(), 3, "逐帧输出被日志污染：{lines:?}");
+    assert!(lines[0].starts_with("frame=0 "));
+    assert!(lines[1].starts_with("frame=1 "));
+    assert!(lines[2].starts_with("trace: frames=1 "));
+    for message in [
+        "fixture print\t7\tnil",
+        "fixture legacy log",
+        "fixture xgc log",
+        "fixture warning",
+    ] {
+        assert!(diagnostics.contains(message), "日志未输出：{message}");
+    }
+}
+
+#[test]
 fn scripted_trace_is_byte_identical_and_matches_run_scripts() {
     let (path, assets) = scripted_world("matches");
     let first = trace_with_assets(&path, "4", &assets);

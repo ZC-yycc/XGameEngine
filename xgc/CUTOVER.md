@@ -94,6 +94,8 @@ Lua VM 默认使用 128 MiB 内存上限。每次钩子调用有约 20 万条指
 
 在含 4,096 个背景实体的脚本回归中，Lua 每帧读取其他实体的名称和局部位置，再写回自身位置。帧视图直接读组件并复用实体行，保留按持久 ID 的同名首占规则。预热后测 60 帧，同机 Release 三轮均从 12,294,840 次分配、1,937,328,660 字节降至 1,500 次、106,080 字节。耗时从 1.624–1.703 秒降至 32.28–59.14 毫秒。数值覆盖 Lua 调用和命令结算，showcase 的 151 个轨迹检查点逐字节一致。[脚本帧分配回归](crates/xgc-script/tests/view_allocations.rs)
 
+Lua 的 `print`、`warn`、`log(ctx, ...)` 与 `xgc.log` 统一写入 stderr。CLI 的逐帧轨迹和 Agent 的 stdio 响应可直接按各自协议解析。[日志与轨迹回归](crates/xgc-cli/tests/trace.rs)
+
 ## 脚本音频与混音
 
 `play_sound`、带位置和总线的播放、停止、监听者及音量控制通过共享宿主在固定步结束时结算。片段按项目搜索顺序或 GUID 解析。同一会话内复用解码后的 WAV，现有声部随总线音量和监听位置更新。48 kHz 单声道 PCM 使用调用方缓冲，按源采样率及 pitch 采样。测试核对了命令先后、现有声部的音量变化、跨块循环及采样值。44.1 kHz 的 `Beep.wav` 经 CLI 同采样率混音，前后 WAV 逐字节一致。[宿主混音回归](crates/xgc-host/tests/audio.rs) · [采样回归](crates/xgc-sim/tests/audio.rs)

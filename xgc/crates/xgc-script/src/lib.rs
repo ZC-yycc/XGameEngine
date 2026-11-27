@@ -152,10 +152,7 @@ impl LuaHost {
             .map_err(|err| format!("注册 remove 失败：{err}"))?;
         let log = self
             .lua
-            .create_function(|_, message: String| {
-                println!("[lua] {message}");
-                Ok(())
-            })
+            .create_function(sandbox::log)
             .map_err(|err| format!("创建 log 失败：{err}"))?;
         api.set("log", log)
             .map_err(|err| format!("注册 log 失败：{err}"))?;
@@ -343,10 +340,7 @@ impl LuaHost {
 
         let log = self
             .lua
-            .create_function(|_, message: String| {
-                println!("[lua] {message}");
-                Ok(())
-            })
+            .create_function(sandbox::log)
             .map_err(|err| format!("创建 log 失败：{err}"))?;
         api.set("log", log)
             .map_err(|err| format!("注册 log 失败：{err}"))?;
