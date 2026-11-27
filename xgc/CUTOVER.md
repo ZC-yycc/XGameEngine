@@ -49,6 +49,21 @@ AABB 加入空间树后，仍按实体 ID 求解，分离改变位置时刷新�
 
 在 `xgc/` 运行 `cargo test --locked --offline -j 2 --release -p xgc-sim --test physics_yard -- --ignored --nocapture --test-threads=1`。可按测试名选择档位，或用 `XGC_S2_SAMPLES` 指定样本数。
 
+## S4 脚本城基线
+
+[中档基准](crates/xgc-host/tests/script_city.rs) 生成 10,000 个带真实 Lua 挂载的实体。计时循环逐步检查世界只增加一个修订号，并在首步、计时结束和分配计数结束时按 ID 核对全部位置和实体修订号。生产 `ScriptedRunner` 与单独调用同一 `ScriptRuntime` 的第 272 步哈希相同。当前每个挂载独立执行 `update(ctx)`，收集的写入在同一次事务结算。模块级 `update(batch)` 仍待接入。
+
+在同一 i7-10700、Windows 10、Rust 1.98.1 MSVC 机器串行执行五轮 Release，每轮预热 32 步、计时 240 步。下表为五轮各分位数的中位值，p99 区间来自各轮实测。
+
+| 项目 | p50 / p95 / p99 ms | p99 区间 ms | 预算 |
+|---|---:|---:|---|
+| 宿主固定步 | 142.806 / 174.366 / 207.680 | 175.513–309.231 | ≤ 6.7 ms，未达标 |
+| 脚本阶段 | 141.015 / 171.041 / 205.394 | 153.776–369.958 | ≤ 0.5 ms，未达标 |
+
+从已生成的 `WorldData` 恢复到完成首次脚本步为 2,952.831 ms（2,908.603–6,647.129），高于 200 ms。30 步分配窗口每轮均为 1,800,450 次 / 159,633,600 B，只计当前线程的 Rust 分配。独立进程实测峰值工作集 890,109,952 B、峰值提交 920,993,792 B，包含 Lua 堆，两项均在 1 GB 内。五轮的初值与第 272、302 步哈希均为 `f803073a8cba6fe5`、`ddb35c3a8cba6fe5`、`95151c3a8cba6fe5`。这个无头场景没有绘制调用，GPU 预算尚未测量。
+
+在 `xgc/` 运行 `cargo test --locked --offline --release -p xgc-host --test script_city -- --ignored --nocapture --test-threads=1`。正式比较先单独构建，再串行运行同一测试产物。预算见[框架设计 §13.2](../Docs/引擎框架设计.md#132-预算)。
+
 ## 项目迁移的实体 ID
 
 从 `xgc/` 先运行 `cargo run -q -p xgc-cli --offline -- migrate ../projects/XGame ../tmp/xgc-project --dry-run` 查看计划，去掉 `--dry-run` 后迁移至新目录。两种模式共用预检与报告，包含实际生成的组件数、项目资产引用数、实体 ID 引用数，以及按源文件和旧实体 ID 定位的待移植项。项目清单的内容根和有序 `search_paths` 共用复制清单，兜底资产及其伴生文件保留源项目的相对目录。GUID 冲突在预检时报出两条路径。XGame 实测生成 230 个组件、26 处资产引用和 16 处实体引用，组件场景中的 Spinner 与 Bobber 仍需移植运行逻辑。
