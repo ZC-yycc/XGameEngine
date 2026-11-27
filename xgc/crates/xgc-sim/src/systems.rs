@@ -339,7 +339,6 @@ impl System for GravitySystem {
 }
 
 /// 层级系统：按 `Parent` 链把局部 `Transform` 合成 `GlobalTransform`。
-/// 层级系统：按 `Parent` 链把局部 `Transform` 合成 `GlobalTransform`。
 ///
 /// 没有 `Parent`、或父节点不带 `GlobalTransform` 的实体按根处理；环里的实体
 /// 保持原值，不阻塞其它节点。节点 / 存在集 / 结果表跨帧复用，稳态不再分配。
@@ -418,9 +417,14 @@ impl System for HierarchySystem {
             }
         }
 
-        for (entity, global) in &self.globals {
+        // 每次写入都会推进修订号，按持久 ID 写回才能让完整快照可重放。
+        self.nodes.sort_unstable_by_key(|node| node.entity);
+        for node in &self.nodes {
+            let Some(global) = self.globals.get(&node.entity) else {
+                continue;
+            };
             let _ = world.set_field(
-                *entity,
+                node.entity,
                 GlobalTransform::ID,
                 "position",
                 &Value::Vec3([
@@ -430,7 +434,7 @@ impl System for HierarchySystem {
                 ]),
             );
             let _ = world.set_field(
-                *entity,
+                node.entity,
                 GlobalTransform::ID,
                 "rotation",
                 &Value::Quat([
@@ -441,7 +445,7 @@ impl System for HierarchySystem {
                 ]),
             );
             let _ = world.set_field(
-                *entity,
+                node.entity,
                 GlobalTransform::ID,
                 "scale",
                 &Value::Vec3([

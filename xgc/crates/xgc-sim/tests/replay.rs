@@ -3,8 +3,8 @@
 use xgc_base::EntityId;
 use xgc_sim::{
     play, verify, AabbCollisionSystem, AnimatorSystem, CharacterJumpSystem, FrameCommands,
-    GravitySystem, GroundCollisionSystem, PhysicsSystem, PlanStage, Scenario, Schedule, SimError,
-    Simulation, System, SystemAccess, VelocitySystem,
+    GravitySystem, GroundCollisionSystem, HierarchySystem, PhysicsSystem, PlanStage, Scenario,
+    Schedule, SimError, Simulation, System, SystemAccess, VelocitySystem,
 };
 use xgc_world::{
     Animator, CharacterController, Command, Component, ComponentId, GlobalTransform, Name, Parent,
@@ -271,6 +271,34 @@ fn hierarchy_system_composes_parent_transforms() {
         world.get_field(parent, GlobalTransform::ID, "position"),
         Some(Value::Vec3([10.0, 0.0, 0.0]))
     );
+}
+
+#[test]
+fn hierarchy_writeback_uses_durable_entity_order() {
+    let mut world = World::new();
+    let root = world.spawn((Transform::default(), GlobalTransform::default()));
+    let root = world.entity(root).unwrap();
+    for _ in 0..15 {
+        world.spawn((
+            Transform::default(),
+            Parent { entity: root },
+            GlobalTransform::default(),
+        ));
+    }
+    let mut reordered = world.world_data();
+    reordered.entities.reverse();
+    let mut restored = World::new();
+    restored.restore_world_data(&reordered).unwrap();
+
+    let revision_before = world.revision();
+    HierarchySystem::default().run(&mut world, 0.0);
+    HierarchySystem::default().run(&mut restored, 0.0);
+    let updated = world.world_data();
+    for (index, entity) in updated.entities.iter().enumerate() {
+        // 位置、旋转和缩放各占一个 revision，最后一次写入记到实体上。
+        assert_eq!(entity.revision, revision_before + 3 * (index as u64 + 1));
+    }
+    assert_eq!(updated, restored.world_data());
 }
 
 #[test]
