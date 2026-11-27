@@ -127,6 +127,8 @@ pub struct ScriptView {
     pub delta: f32,
     pub time: f32,
     pub entities: Vec<EntityView>,
+    // 只对运行时自己刷新的视图使用二分。公开 LuaHost 的调用方仍可提供任意行序。
+    entities_sorted: bool,
     pub actions: BTreeMap<String, ActionState>,
     /// 模拟量轴：`axis(ctx, "MoveX")` 读这里。与动作一样由宿主每帧写入。
     pub axes: BTreeMap<String, f32>,
@@ -191,19 +193,36 @@ impl ScriptView {
         self.actions.get_mut(name).expect("动作状态已插入")
     }
 
+    pub(crate) fn refresh_entities(&mut self, world: &World, keys: &mut [(EntityId, EntityKey)]) {
+        // 同名查找也依赖持久 ID 顺序，运行时槽位复用不能改变首占实体。
+        keys.sort_unstable_by_key(|&(id, _)| id);
+        self.entities.resize_with(keys.len(), EntityView::default);
+        for (row, &(id, key)) in self.entities.iter_mut().zip(keys.iter()) {
+            row.refresh(world, id, key);
+        }
+        self.entities_sorted = true;
+    }
+
+    fn entity_index(&self, id: u64) -> Option<usize> {
+        if self.entities_sorted {
+            self.entities.binary_search_by_key(&id, |row| row.id).ok()
+        } else {
+            self.entities.iter().position(|row| row.id == id)
+        }
+    }
+
     pub fn entity(&self, id: u64) -> Option<&EntityView> {
-        self.entities
-            .iter()
-            .find(|entity| entity.id == id)
-            .or_else(|| self.pending_spawns.get(&id))
+        match self.entity_index(id) {
+            Some(index) => Some(&self.entities[index]),
+            None => self.pending_spawns.get(&id),
+        }
     }
 
     pub(crate) fn entity_mut(&mut self, id: u64) -> Option<&mut EntityView> {
-        let row = self
-            .entities
-            .iter_mut()
-            .find(|entity| entity.id == id)
-            .or_else(|| self.pending_spawns.get_mut(&id))?;
+        let row = match self.entity_index(id) {
+            Some(index) => &mut self.entities[index],
+            None => self.pending_spawns.get_mut(&id)?,
+        };
         if let Some(checkpoint) = &mut self.mount_checkpoint {
             if !checkpoint.entities.iter().any(|saved| saved.id == id) {
                 checkpoint.entities.push(row.clone());

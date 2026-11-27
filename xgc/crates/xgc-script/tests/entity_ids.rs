@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use xgc_base::EntityId;
-use xgc_script::{LuaHost, ScriptView};
+use xgc_script::{EntityView, LuaHost, ScriptView};
 use xgc_world::{Transform, World};
 
 #[test]
@@ -42,4 +42,36 @@ fn ui_spawn_returns_zero_after_the_last_assignable_id() {
     world.apply(&plan).unwrap();
     assert_eq!(world.len(), 1);
     assert_eq!(world.next_entity_id().raw(), u64::MAX);
+}
+
+#[test]
+fn caller_supplied_views_keep_first_match_in_input_order() {
+    let view = Rc::new(RefCell::new(ScriptView::default()));
+    view.borrow_mut().entities.extend(
+        [(40, "first", 1.0), (7, "other", 2.0), (40, "last", 3.0)]
+            .into_iter()
+            .map(|(id, name, x)| EntityView {
+                id,
+                name: name.into(),
+                position: Some([x, 0.0, 0.0]),
+                ..EntityView::default()
+            }),
+    );
+    let host =
+        LuaHost::with_commands_and_view(Rc::new(RefCell::new(Vec::new())), Rc::clone(&view), 40)
+            .unwrap();
+    let result = host
+        .eval::<(String, f32, f32)>(
+            r#"
+local name = entity_name(nil, 40)
+local other = entity_pos(nil, 7).x
+set_pos(nil, 10, 0, 0)
+return name, other, entity_pos(nil, 40).x
+"#,
+        )
+        .unwrap();
+    assert_eq!(result, ("first".into(), 2.0, 10.0));
+    let view = view.borrow();
+    assert_eq!(view.entities[0].position, Some([10.0, 0.0, 0.0]));
+    assert_eq!(view.entities[2].position, Some([3.0, 0.0, 0.0]));
 }

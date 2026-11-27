@@ -13,7 +13,7 @@ use xgc_base::{EntityId, EntityKey};
 use xgc_world::{AudioCommand, AudioMixer, Command, ListenerPose, Script, World};
 
 use crate::legacy::Commands;
-use crate::view::{EntityView, ScriptView};
+use crate::view::ScriptView;
 use crate::LuaHost;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -289,17 +289,11 @@ impl ScriptRuntime {
         self.entity_keys.clear();
         self.entity_keys.reserve(world.len());
         self.entity_keys.extend(world.entity_keys());
-        // 同名实体按最小持久 ID 首占；回收运行时槽位后这个顺序仍需保持。
-        self.entity_keys.sort_unstable_by_key(|&(id, _)| id);
 
         let mut view = self.view.borrow_mut();
         view.delta = dt;
         view.time = self.time;
-        view.entities
-            .resize_with(self.entity_keys.len(), EntityView::default);
-        for (row, &(id, key)) in view.entities.iter_mut().zip(&self.entity_keys) {
-            row.refresh(world, id, key);
-        }
+        view.refresh_entities(world, &mut self.entity_keys);
         view.spawn_cursor = world.next_entity_id().raw();
         view.pending_spawns.clear();
         view.audio.authored_mix = world.audio_mixer();
