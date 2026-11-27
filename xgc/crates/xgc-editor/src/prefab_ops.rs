@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use xgc_base::{path::normalize_project_relative, EntityId};
 use xgc_store::{load_prefab, load_prefab_with_bytes, save_prefab_if_unchanged};
 use xgc_world::{
-    apply_prefab_values, instantiate_prefab, revert_prefab, Component, Parent, PrefabInstance,
+    apply_prefab_values, instantiate_prefab, instantiate_prefab_with_ids, revert_prefab,
+    revert_prefab_with_ids, Component, Parent, PrefabInstance,
 };
 
 use crate::{AssetKind, EditorState};
@@ -45,7 +46,19 @@ impl EditorState {
             .map(|entity| entity.id)
             .ok_or_else(|| "预制体没有根实体".to_string())?;
         let before = self.world.world_data();
-        let mapping = instantiate_prefab(&mut self.world, &data, Some(&source))?;
+        let mapping = match &mut self.project {
+            Some(project) => instantiate_prefab_with_ids(
+                &mut self.world,
+                &data,
+                Some(&source),
+                |local, count| {
+                    project
+                        .reserve_entity_ids(count, local)
+                        .map_err(|err| err.to_string())
+                },
+            ),
+            None => instantiate_prefab(&mut self.world, &data, Some(&source)),
+        }?;
         let root = mapping
             .iter()
             .find_map(|(asset, instance)| (*asset == root_asset).then_some(*instance))
@@ -71,7 +84,16 @@ impl EditorState {
         let (selected, path) = self.selected_prefab_path()?;
         let data = load_prefab(&path).map_err(|err| format!("读取预制体失败：{err}"))?;
         let before = self.world.world_data();
-        let mapping = revert_prefab(&mut self.world, &data, selected)?;
+        let mapping = match &mut self.project {
+            Some(project) => {
+                revert_prefab_with_ids(&mut self.world, &data, selected, |local, count| {
+                    project
+                        .reserve_entity_ids(count, local)
+                        .map_err(|err| err.to_string())
+                })
+            }
+            None => revert_prefab(&mut self.world, &data, selected),
+        }?;
         self.record_undo(before);
         if !mapping.iter().any(|(_, instance)| *instance == selected) {
             self.selected = mapping.iter().find_map(|(_, instance)| {

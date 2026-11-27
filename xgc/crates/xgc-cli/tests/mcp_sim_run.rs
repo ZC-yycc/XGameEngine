@@ -36,7 +36,8 @@ fn project(root: &Path, first_script: &str) {
     fs::write(
         root.join("project.xgc"),
         r#"(
-            format_version: 1,
+            format_version: 2,
+            next_entity_id: 1,
             name: "MCP preview",
             entry_scene: "scenes/unused.json",
             scenes: ["scenes/unused.json"],

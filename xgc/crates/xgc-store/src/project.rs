@@ -6,21 +6,30 @@
 //! 路径一律是项目相对路径（正斜杠），读写边界都走
 //! `xgc_base::path::normalize_project_relative`，不在这里另写一套。
 
+use std::fs::{self, File, OpenOptions};
+use std::io::ErrorKind;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use xgc_base::layer::CollisionLayers;
 use xgc_base::path::normalize_project_relative;
 use xgc_base::render_settings::{RenderQuality, RenderSettings};
+use xgc_base::EntityId;
 
-use crate::{load_world, write_atomic, Result, StoreError};
+use crate::{load_world, write_atomic_checked, Result, StoreError};
 
 /// 清单格式版本；新增必填字段必须同时上调。
-pub const PROJECT_FORMAT_VERSION: u32 = 1;
+pub const PROJECT_FORMAT_VERSION: u32 = 2;
+const PROJECT_FILE: &str = "project.xgc";
+const PROJECT_LOCK: &str = ".xgc-project.lock";
+const PROJECT_CONFLICT: &str = "项目清单已被外部修改；请重新打开项目";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectManifest {
     pub format_version: u32,
+    /// 已承诺的项目 ID 区间的上界，`u64::MAX` 表示耗尽。
+    pub next_entity_id: u64,
     pub name: String,
     /// 启动场景；必须出现在 `scenes` 里。
     pub entry_scene: String,
@@ -61,6 +70,11 @@ impl ProjectManifest {
                 "project.xgc 版本 {} 不受支持（当前 {PROJECT_FORMAT_VERSION}）",
                 self.format_version
             )));
+        }
+        if self.next_entity_id == 0 {
+            return Err(StoreError::Format(
+                "project.xgc 的 next_entity_id 必须至少为 1".into(),
+            ));
         }
         if self.name.trim().is_empty() {
             return Err(StoreError::Format("project.xgc 的 name 不能为空".into()));
@@ -114,17 +128,71 @@ impl ProjectManifest {
 
 pub fn save_project(path: &Path, manifest: &ProjectManifest) -> Result<()> {
     manifest.validate()?;
-    let text = ron::ser::to_string_pretty(manifest, ron::ser::PrettyConfig::default())
-        .map_err(|err| StoreError::Format(format!("project.xgc 序列化失败：{err}")))?;
-    write_atomic(path, text.as_bytes())
+    let root = project_parent(path);
+    fs::create_dir_all(root)?;
+    let _lock = lock_project(root)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            let path = checked_manifest_path(path, root)?;
+            let bytes = fs::read(&path)?;
+            let current = decode_manifest(&bytes)?;
+            if manifest.next_entity_id < current.next_entity_id {
+                return Err(StoreError::Format("项目 ID 水位不能回退".into()));
+            }
+            write_manifest(&path, manifest, Some(&bytes))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => write_manifest(path, manifest, None),
+        Err(err) => Err(err.into()),
+    }
 }
 
 pub fn load_project(path: &Path) -> Result<ProjectManifest> {
-    let text = std::fs::read_to_string(path)?;
-    let manifest: ProjectManifest = ron::from_str(&text)
+    decode_manifest(&fs::read(path)?)
+}
+
+fn decode_manifest(bytes: &[u8]) -> Result<ProjectManifest> {
+    let manifest: ProjectManifest = ron::de::from_bytes(bytes)
         .map_err(|err| StoreError::Format(format!("project.xgc 解析失败：{err}")))?;
     manifest.validate()?;
     Ok(manifest)
+}
+
+fn write_manifest(path: &Path, manifest: &ProjectManifest, expected: Option<&[u8]>) -> Result<()> {
+    let text = ron::ser::to_string_pretty(manifest, ron::ser::PrettyConfig::default())
+        .map_err(|err| StoreError::Format(format!("project.xgc 序列化失败：{err}")))?;
+    write_atomic_checked(
+        path,
+        text.as_bytes(),
+        expected.map(|bytes| (bytes, PROJECT_CONFLICT)),
+    )
+}
+
+fn project_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn checked_manifest_path(path: &Path, root: &Path) -> Result<PathBuf> {
+    let canonical = path.canonicalize()?;
+    if canonical.parent() != Some(root.canonicalize()?.as_path()) || !canonical.is_file() {
+        return Err(StoreError::Format(
+            "项目清单必须是项目根目录内的文件".into(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn lock_project(root: &Path) -> Result<File> {
+    // 固定锁文件跨越清单的 rename，所有写进程都锁同一文件。关闭句柄释放锁。
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(PROJECT_LOCK))?;
+    lock.lock()?;
+    Ok(lock)
 }
 
 /// 已打开的项目：清单 + 根目录。三个宿主都从这里取入口场景与内容根，
@@ -132,6 +200,7 @@ pub fn load_project(path: &Path) -> Result<ProjectManifest> {
 #[derive(Clone, Debug)]
 pub struct ProjectSession {
     root: PathBuf,
+    manifest_path: PathBuf,
     manifest: ProjectManifest,
 }
 
@@ -139,17 +208,78 @@ impl ProjectSession {
     /// `path` 可以是项目目录，也可以直接是 `project.xgc`。
     pub fn open(path: &Path) -> Result<Self> {
         let manifest_path = if path.is_dir() {
-            path.join("project.xgc")
+            path.join(PROJECT_FILE)
         } else {
             path.to_path_buf()
         };
         let manifest = load_project(&manifest_path)?;
-        let root = manifest_path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        Ok(Self { root, manifest })
+        Self::from_manifest(&manifest_path, manifest)
+    }
+
+    /// 离线工具可先构造候选清单，复用同一项目路径解析和校验。
+    pub fn from_manifest(path: &Path, manifest: ProjectManifest) -> Result<Self> {
+        manifest.validate()?;
+        let root = project_parent(path);
+        let manifest_path = checked_manifest_path(path, root)?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            manifest_path,
+            manifest,
+        })
+    }
+
+    /// 先持久化水位，再交出尚未使用的连续 ID。撤销或丢弃草稿可以留下空号。
+    pub fn reserve_entity_ids(
+        &mut self,
+        count: usize,
+        world_next_id: EntityId,
+    ) -> Result<Range<u64>> {
+        let _lock = lock_project(project_parent(&self.manifest_path))?;
+        let bytes = fs::read(&self.manifest_path)?;
+        let mut manifest = decode_manifest(&bytes)?;
+        let start = manifest.next_entity_id;
+        if start < world_next_id.raw() || start < self.manifest.next_entity_id {
+            return Err(StoreError::Format(
+                "项目 ID 水位落后于场景或当前会话".into(),
+            ));
+        }
+        let end = u64::try_from(count)
+            .ok()
+            .and_then(|count| start.checked_add(count))
+            .ok_or_else(|| StoreError::Format("项目实体 ID 已耗尽".into()))?;
+        manifest.next_entity_id = end;
+        write_manifest(&self.manifest_path, &manifest, Some(&bytes))?;
+        self.manifest.next_entity_id = end;
+        Ok(start..end)
+    }
+
+    /// 从磁盘直开已登记场景时，同样采用项目级的编辑语义。
+    pub fn containing_scene(path: &Path) -> Result<Option<(Self, String)>> {
+        let canonical = match path.canonicalize() {
+            Ok(path) => path,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        for root in canonical.ancestors().skip(1) {
+            let manifest = root.join(PROJECT_FILE);
+            match fs::metadata(&manifest) {
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.into()),
+            }
+            let session = Self::open(&manifest)?;
+            for scene in &session.manifest.scenes {
+                match session.scene_path(scene)?.canonicalize() {
+                    Ok(path) if path == canonical => {
+                        return Ok(Some((session.clone(), scene.clone())))
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn root(&self) -> &Path {

@@ -29,6 +29,7 @@ mod render;
 mod runtime_cmd;
 mod script_cmd;
 mod trace_cmd;
+mod upgrade_project;
 mod world_cmd;
 
 fn main() -> ExitCode {

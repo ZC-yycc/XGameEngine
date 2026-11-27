@@ -297,6 +297,7 @@ mod tests {
         let manifest_path = root.join("project.xgc");
         let mut manifest = ProjectManifest {
             format_version: xgc_store::PROJECT_FORMAT_VERSION,
+            next_entity_id: world.next_entity_id().raw(),
             name: "controls".into(),
             entry_scene: "scene.json".into(),
             scenes: vec!["scene.json".into()],

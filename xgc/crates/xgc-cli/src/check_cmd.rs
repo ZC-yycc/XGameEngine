@@ -10,7 +10,7 @@ use xgc_reflect::Registry;
 use xgc_store::load_world;
 use xgc_world::World;
 
-mod project;
+pub(crate) mod project;
 
 pub fn check(path: Option<&str>) -> ExitCode {
     let registry = xgc_world::builtin_registry();

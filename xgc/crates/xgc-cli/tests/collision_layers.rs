@@ -45,6 +45,7 @@ fn project_and_cooked_filter_a_pair_when_either_side_blocks_it() {
         },
     ));
     let ball = world.entity(ball).unwrap();
+    let next_entity_id = world.next_entity_id().raw();
     save_world(&scene, &world.world_data()).unwrap();
 
     let mut expected_hashes = Vec::new();
@@ -52,7 +53,7 @@ fn project_and_cooked_filter_a_pair_when_either_side_blocks_it() {
         fs::write(
             source.join("project.xgc"),
             format!(
-                r#"(format_version: 1, name: "Groups", entry_scene: "scenes/entry.json",
+                r#"(format_version: 2, next_entity_id: {next_entity_id}, name: "Groups", entry_scene: "scenes/entry.json",
                     scenes: ["scenes/entry.json"],
                     content: (models: "Resources", textures: "Resources", audio: "Resources",
                               prefabs: "Prefabs", scripts: "Scripts"),

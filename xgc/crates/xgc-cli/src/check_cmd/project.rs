@@ -15,6 +15,18 @@ use xgc_world::{ComponentData, Parent, PluginComponent, PrefabInstance, World, W
 
 pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckReport, String> {
     let project = ProjectSession::open(path).map_err(|err| format!("{}：{err}", path.display()))?;
+    check_session(&project, registry).map(|audit| audit.report)
+}
+
+pub(crate) struct ProjectAudit {
+    pub report: ProjectCheckReport,
+    pub next_entity_id: u64,
+}
+
+pub(crate) fn check_session(
+    project: &ProjectSession,
+    registry: &Registry,
+) -> Result<ProjectAudit, String> {
     let manifest = project.manifest();
     let root = project
         .root()
@@ -22,7 +34,7 @@ pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckRepo
         .map_err(|err| err.to_string())?;
     let entry = project.entry_scene();
     let (entry_path, entry_data) =
-        load_scene(&project, &root, entry).map_err(|err| format!("入口场景 {entry}：{err}"))?;
+        load_scene(project, &root, entry).map_err(|err| format!("入口场景 {entry}：{err}"))?;
 
     let mut report = ProjectCheckReport {
         name: manifest.name.clone(),
@@ -48,6 +60,8 @@ pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckRepo
         catalog,
         search_paths: SearchPaths::new(&manifest.search_paths),
         report,
+        project_next_id: manifest.next_entity_id,
+        next_entity_id: 1,
         scripts: BTreeSet::new(),
         seen_ids: BTreeMap::new(),
         prefabs: BTreeMap::new(),
@@ -61,7 +75,7 @@ pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckRepo
         if normalize_project_relative(scene).ok() == entry_key {
             continue;
         }
-        match load_scene(&project, &audit.root, scene) {
+        match load_scene(project, &audit.root, scene) {
             Ok((path, data)) => {
                 if scenes.insert(path) {
                     audit.scene(scene, &data);
@@ -86,7 +100,10 @@ pub(super) fn check(path: &Path, registry: &Registry) -> Result<ProjectCheckRepo
         audit.input(input, project.input_path());
     }
     audit.check_scripts();
-    Ok(audit.report)
+    Ok(ProjectAudit {
+        report: audit.report,
+        next_entity_id: audit.next_entity_id,
+    })
 }
 
 fn load_scene(
@@ -105,6 +122,8 @@ struct Audit<'a> {
     catalog: AssetCatalog,
     search_paths: SearchPaths,
     report: ProjectCheckReport,
+    project_next_id: u64,
+    next_entity_id: u64,
     scripts: BTreeSet<PathBuf>,
     seen_ids: BTreeMap<EntityId, String>,
     prefabs: BTreeMap<PathBuf, Option<BTreeSet<EntityId>>>,
@@ -196,8 +215,32 @@ impl Audit<'_> {
                 .problems
                 .push(format!("{document}：{diagnostic}"));
         }
+        self.next_entity_id = self.next_entity_id.max(data.next_id);
+        if data.next_id > self.project_next_id {
+            self.problem(
+                "project.id_watermark",
+                document,
+                &format!(
+                    "文件 ID 水位 {} 超出项目 next_entity_id {}",
+                    data.next_id, self.project_next_id
+                ),
+            );
+        }
         let ids: BTreeSet<_> = data.entities.iter().map(|entity| entity.id).collect();
         for id in ids.iter().copied() {
+            if id.validate().is_ok() {
+                self.next_entity_id = self.next_entity_id.max(id.raw() + 1);
+                if id.raw() >= self.project_next_id {
+                    self.problem(
+                        "project.id_watermark",
+                        document,
+                        &format!(
+                            "实体 ID {id} 未低于项目 next_entity_id {}",
+                            self.project_next_id
+                        ),
+                    );
+                }
+            }
             if let Some(first) = self.seen_ids.get(&id) {
                 let message = format!("实体 ID {id} 已出现在 {first}");
                 self.problem("project.duplicate_id", document, &message);

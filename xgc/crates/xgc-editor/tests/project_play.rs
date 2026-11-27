@@ -60,6 +60,7 @@ end
     let manifest_path = dir.join("project.xgc");
     let mut manifest = ProjectManifest {
         format_version: xgc_store::PROJECT_FORMAT_VERSION,
+        next_entity_id: world.next_entity_id().raw(),
         name: "demo".into(),
         entry_scene: "scenes/main.json".into(),
         scenes: vec!["scenes/main.json".into()],
@@ -182,7 +183,7 @@ fn project_play_respects_collision_masks_in_the_play_copy() {
     std::fs::create_dir_all(dir.join("scenes")).unwrap();
     std::fs::write(
         dir.join("project.xgc"),
-        r#"(format_version: 1, name: "Groups", entry_scene: "scenes/main.json",
+        r#"(format_version: 2, next_entity_id: 3, name: "Groups", entry_scene: "scenes/main.json",
             scenes: ["scenes/main.json"], content: (models: "Resources", textures: "Resources",
                 audio: "Resources", prefabs: "Prefabs", scripts: "Scripts"),
             layers: (masks: {31: 0}))"#,

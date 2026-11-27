@@ -102,7 +102,11 @@ pub fn save_prefab_if_unchanged(path: &Path, data: &WorldData, expected: &[u8]) 
     let bytes = encode("prefab", data)?;
     // serde_json 会把非有限浮点写成 null；必须在替换前确认写出的资产仍能加载。
     decode::<WorldData>(&bytes, "prefab")?;
-    write_atomic_checked(path, &bytes, Some(expected))
+    write_atomic_checked(
+        path,
+        &bytes,
+        Some((expected, "预制体已被外部修改；请重试 Apply")),
+    )
 }
 
 pub fn load_prefab(path: &Path) -> Result<WorldData> {
@@ -162,9 +166,9 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     write_atomic_checked(path, bytes, None)
 }
 
-fn write_atomic_checked(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> Result<()> {
-    if let Some(expected) = expected {
-        check_prefab_bytes(path, expected)?;
+fn write_atomic_checked(path: &Path, bytes: &[u8], expected: Option<(&[u8], &str)>) -> Result<()> {
+    if let Some((expected, conflict)) = expected {
+        check_bytes(path, expected, conflict)?;
         if expected == bytes {
             return Ok(());
         }
@@ -185,11 +189,11 @@ fn write_atomic_checked(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> R
         file.sync_all()?;
         drop(file);
 
-        if let Some(expected) = expected {
-            check_prefab_bytes(path, expected)?;
+        if let Some((expected, conflict)) = expected {
+            check_bytes(path, expected, conflict)?;
         }
         match fs::rename(&temp, path) {
-            // Apply 的条件替换失败时，旧资产仍须完整留在原处。
+            // 条件替换失败时，保留原文件。
             Err(err)
                 if expected.is_none()
                     && matches!(
@@ -214,11 +218,9 @@ fn write_atomic_checked(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> R
     result
 }
 
-fn check_prefab_bytes(path: &Path, expected: &[u8]) -> Result<()> {
+fn check_bytes(path: &Path, expected: &[u8], conflict: &str) -> Result<()> {
     if fs::read(path)? != expected {
-        return Err(StoreError::Format(
-            "预制体已被外部修改；请重试 Apply".into(),
-        ));
+        return Err(StoreError::Format(conflict.into()));
     }
     Ok(())
 }

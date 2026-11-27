@@ -4,6 +4,7 @@
 
 mod app;
 mod assets_ops;
+mod authoring;
 mod gizmo;
 mod play;
 mod prefab_ops;
@@ -140,6 +141,10 @@ impl EditorState {
                 .scene_path(&scene)
                 .map_err(|err| format!("入口场景路径不合法：{err}"))?;
             (scene_path, Some(session), Some(scene))
+        } else if let Some((session, scene)) = ProjectSession::containing_scene(path)
+            .map_err(|err| format!("读取所属项目失败：{err}"))?
+        {
+            (path.to_path_buf(), Some(session), Some(scene))
         } else {
             (path.to_path_buf(), None, None)
         };
@@ -351,31 +356,6 @@ impl EditorState {
         self.undo.push(self.world.world_data());
         self.restore_snapshot(snapshot)?;
         Ok(true)
-    }
-
-    /// 新建实体（Name + Transform），返回持久 ID。
-    pub fn spawn_entity(&mut self, name: &str) -> Result<EntityId, String> {
-        if self.play.is_some() {
-            return Err("Play 期间不能新建实体".to_string());
-        }
-        self.world
-            .next_entity_id()
-            .validate()
-            .map_err(|err| format!("新建实体失败：{err}"))?;
-        self.push_undo();
-        let key = self.world.spawn((
-            Name {
-                value: name.to_string(),
-            },
-            Transform::default(),
-        ));
-        let id = self
-            .world
-            .entity(key)
-            .ok_or_else(|| "新建实体失败".to_string())?;
-        self.selected = Some(id);
-        self.dirty = true;
-        Ok(id)
     }
 
     pub fn delete_selected(&mut self) -> Result<(), String> {

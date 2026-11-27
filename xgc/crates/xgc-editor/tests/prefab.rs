@@ -27,6 +27,7 @@ fn applies_native_prefab_values_to_moved_guid_asset() {
         &temp.0.join("project.xgc"),
         &ProjectManifest {
             format_version: xgc_store::PROJECT_FORMAT_VERSION,
+            next_entity_id: load_prefab(&original).unwrap().next_id,
             name: "demo".into(),
             entry_scene: "scenes/main.json".into(),
             scenes: vec!["scenes/main.json".into()],

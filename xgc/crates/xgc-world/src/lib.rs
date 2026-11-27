@@ -62,7 +62,10 @@ pub use parts::WriteSet;
 pub use physics_components::{BodyKind, PhysicsBody};
 pub use plugin_components::PluginComponent;
 pub use prefab_components::PrefabInstance;
-pub use prefab_ops::{apply_prefab_values, instantiate_prefab, remap_parent, revert_prefab};
+pub use prefab_ops::{
+    apply_prefab_values, instantiate_prefab, instantiate_prefab_with_ids, remap_parent,
+    revert_prefab, revert_prefab_with_ids,
+};
 pub use registry::builtin_registry;
 pub use render_components::{Camera, Material, MeshRenderer};
 pub use root_motion::{

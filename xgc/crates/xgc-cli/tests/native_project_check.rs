@@ -344,6 +344,7 @@ fn manifest(root: &Path) -> ProjectManifest {
     fs::create_dir_all(root.join("Prefabs/Nested")).unwrap();
     let manifest = ProjectManifest {
         format_version: xgc_store::PROJECT_FORMAT_VERSION,
+        next_entity_id: 1_000,
         name: "Fixture".into(),
         entry_scene: "scenes/main.json".into(),
         scenes: vec!["scenes/main.json".into(), "scenes/other.json".into()],

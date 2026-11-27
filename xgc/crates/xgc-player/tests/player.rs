@@ -175,6 +175,7 @@ fn selects_a_named_scene_from_the_project_manifest() {
         &dir.join("project.xgc"),
         &ProjectManifest {
             format_version: xgc_store::PROJECT_FORMAT_VERSION,
+            next_entity_id: extra.next_entity_id().raw(),
             name: "demo".to_string(),
             entry_scene: "scenes/main.json".to_string(),
             scenes: vec![

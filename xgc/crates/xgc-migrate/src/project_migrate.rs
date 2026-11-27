@@ -300,8 +300,9 @@ fn plan_project(root: &Path, project: &OldProject) -> Result<Plan, ProjectMigrat
         .into_iter()
         .filter(|path| seen_search.insert(path.clone()))
         .collect();
-    let manifest = ProjectManifest {
+    let mut manifest = ProjectManifest {
         format_version: PROJECT_FORMAT_VERSION,
+        next_entity_id: 1,
         name,
         entry_scene: entry_out,
         scenes: scenes.iter().map(|scene| scene.target.clone()).collect(),
@@ -353,7 +354,7 @@ fn plan_project(root: &Path, project: &OldProject) -> Result<Plan, ProjectMigrat
             .chain(prefabs.targets()),
         directories.iter().map(String::as_str),
     )?;
-    remap_document_ids(&mut scenes, &mut prefabs);
+    manifest.next_entity_id = remap_document_ids(&mut scenes, &mut prefabs);
     prefabs.remap_instances(&mut scenes)?;
     Ok(Plan {
         manifest,
@@ -377,7 +378,7 @@ fn scene_output(old: &str, scenes_dir: &str) -> Result<String, ProjectMigrationE
     Ok(format!("scenes/{stem}.json"))
 }
 
-fn remap_document_ids(scenes: &mut [WorldPlan], prefabs: &mut PrefabPlans) {
+fn remap_document_ids(scenes: &mut [WorldPlan], prefabs: &mut PrefabPlans) -> u64 {
     // 用文件路径和旧 ID 排序，关卡改序或新增预制体不改变既有场景映射。
     scenes.sort_unstable_by(|left, right| left.source.cmp(&right.source));
     let mut prefab_documents: Vec<_> = prefabs
@@ -397,6 +398,7 @@ fn remap_document_ids(scenes: &mut [WorldPlan], prefabs: &mut PrefabPlans) {
     for document in scenes.iter_mut().chain(prefab_documents) {
         document.world.next_id = next_id;
     }
+    next_id
 }
 
 fn write_staging(root: &Path, staging: &Path, plan: &Plan) -> Result<(), ProjectMigrationError> {

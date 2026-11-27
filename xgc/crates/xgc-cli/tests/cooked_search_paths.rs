@@ -18,6 +18,7 @@ fn cooked_run_uses_the_same_ordered_search_roots_as_the_project() {
     }
     let project = ProjectManifest {
         format_version: PROJECT_FORMAT_VERSION,
+        next_entity_id: 100,
         name: "Search fixture".into(),
         entry_scene: "scenes/entry.json".into(),
         scenes: vec!["scenes/entry.json".into()],

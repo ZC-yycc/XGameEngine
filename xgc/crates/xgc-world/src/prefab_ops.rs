@@ -1,6 +1,7 @@
 //! 预制体实例化、还原与值写回，共用来源身份和父链映射。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ops::Range;
 
 use xgc_base::EntityId;
 
@@ -15,7 +16,17 @@ pub fn instantiate_prefab(
     prefab: &WorldData,
     source: Option<&str>,
 ) -> Result<Vec<(EntityId, EntityId)>, String> {
-    let mapping = map_entities(world, prefab, &BTreeMap::new())?;
+    instantiate_prefab_with_ids(world, prefab, source, local_ids)
+}
+
+/// 项目编辑器在应用 Spawn 之前先提交同一批新 ID 的高水位。
+pub fn instantiate_prefab_with_ids(
+    world: &mut World,
+    prefab: &WorldData,
+    source: Option<&str>,
+    reserve: impl FnOnce(EntityId, usize) -> Result<Range<u64>, String>,
+) -> Result<Vec<(EntityId, EntityId)>, String> {
+    let mapping = map_entities(world, prefab, &BTreeMap::new(), reserve)?;
     let commands = prefab
         .entities
         .iter()
@@ -58,9 +69,18 @@ pub fn revert_prefab(
     prefab: &WorldData,
     selected: EntityId,
 ) -> Result<Vec<(EntityId, EntityId)>, String> {
+    revert_prefab_with_ids(world, prefab, selected, local_ids)
+}
+
+/// 只为 Revert 新增的成员发号，已有来源仍映射到原实例 ID。
+pub fn revert_prefab_with_ids(
+    world: &mut World,
+    prefab: &WorldData,
+    selected: EntityId,
+    reserve: impl FnOnce(EntityId, usize) -> Result<Range<u64>, String>,
+) -> Result<Vec<(EntityId, EntityId)>, String> {
     let (root, instance) = find_root(world, selected)?;
     let current = instance_entities(world, root, instance)?;
-    let mapping = map_entities(world, prefab, &current)?;
     let old_root_source = EntityId::from_raw(instance.source_id);
     let mut asset_roots = prefab.entities.iter().filter(|entity| !has_parent(entity));
     let first_root = asset_roots
@@ -76,6 +96,7 @@ pub fn revert_prefab(
     let root_data = world
         .entity_data(root)
         .ok_or_else(|| format!("无法读取预制体实例根：{root}"))?;
+    let mapping = map_entities(world, prefab, &current, reserve)?;
     let mut entities = Vec::with_capacity(prefab.entities.len());
     for entity in &prefab.entities {
         let mut data = entity.clone().with_id(mapping[&entity.id]);
@@ -270,31 +291,54 @@ fn validate_apply_asset(world: &World, prefab: &WorldData, root: EntityId) -> Re
     Ok(())
 }
 
+fn local_ids(start: EntityId, count: usize) -> Result<Range<u64>, String> {
+    let count = u64::try_from(count).map_err(|_| "预制体所需的实体 ID 已耗尽")?;
+    let end = start
+        .raw()
+        .checked_add(count)
+        .ok_or("预制体所需的实体 ID 已耗尽")?;
+    Ok(start.raw()..end)
+}
+
 fn map_entities(
     world: &World,
     prefab: &WorldData,
     current: &BTreeMap<EntityId, EntityId>,
+    reserve: impl FnOnce(EntityId, usize) -> Result<Range<u64>, String>,
 ) -> Result<BTreeMap<EntityId, EntityId>, String> {
     if prefab.entities.is_empty() {
         return Err("预制体为空".to_string());
     }
-    // Spawn 提交时会推进世界的 ID 分配器，坏计划无需预留 ID。
-    let mut available = world.next_id..=EntityId::MAX_ASSIGNABLE_RAW;
-    let mut mapping = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut needed = 0;
     for entity in &prefab.entities {
         entity.id.validate().map_err(|error| error.to_string())?;
-        let target = match current.get(&entity.id) {
-            Some(&id) => id,
-            None => available
-                .next()
-                .map(EntityId::from_raw)
-                .ok_or_else(|| "预制体所需的实体 ID 已耗尽".to_string())?,
-        };
-        if mapping.insert(entity.id, target).is_some() {
+        if !seen.insert(entity.id) {
             return Err(format!("预制体实体 ID 重复：{}", entity.id));
         }
+        needed += usize::from(!current.contains_key(&entity.id));
     }
-    Ok(mapping)
+    let local = world.next_entity_id();
+    let mut available = if needed == 0 {
+        0..0
+    } else {
+        let ids = reserve(local, needed)?;
+        if ids.start < local.raw() || ids.end.checked_sub(ids.start) != Some(needed as u64) {
+            return Err("预制体获得的实体 ID 区间不合法".into());
+        }
+        ids
+    };
+    // 沿原文件顺序分配，提交 Spawn 时再推进场景自己的运行时游标。
+    Ok(prefab
+        .entities
+        .iter()
+        .map(|entity| {
+            let target = current.get(&entity.id).copied().unwrap_or_else(|| {
+                EntityId::from_raw(available.next().expect("已为新增成员分配 ID"))
+            });
+            (entity.id, target)
+        })
+        .collect())
 }
 
 fn find_root(world: &World, selected: EntityId) -> Result<(EntityId, &PrefabInstance), String> {

@@ -1,8 +1,9 @@
-//! `xgc migrate`：单场景 / flat 目录 / 旧项目目录三种入口。
+//! `xgc migrate`：旧场景、旧项目和早期原生项目的离线迁移入口。
 //!
-//! 项目目录先走 `check_old_project`，坏项目不开始迁移；输出目录由
-//! `xgc-migrate` 用 staging + rename 保证事务性。
+//! 项目先过只读检查，再用同级暂存目录发布，避免留下半份项目。
 
+use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -26,6 +27,17 @@ pub(crate) fn migrate(input: Option<&str>, output: Option<&str>, flag: Option<&s
         return ExitCode::from(2);
     };
     if Path::new(input).is_dir() {
+        let native = Path::new(input).join("project.xgc");
+        match fs::symlink_metadata(&native) {
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            _ => {
+                return crate::upgrade_project::upgrade(
+                    Path::new(input),
+                    Path::new(output),
+                    dry_run,
+                )
+            }
+        }
         if Path::new(input).join("project.ron").is_file() {
             return migrate_project(Path::new(input), Path::new(output), dry_run);
         }

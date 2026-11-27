@@ -31,6 +31,7 @@ impl Project {
             &root.join("project.xgc"),
             &ProjectManifest {
                 format_version: xgc_store::PROJECT_FORMAT_VERSION,
+                next_entity_id: 1,
                 name: "assets".into(),
                 entry_scene: "main.json".into(),
                 scenes: vec!["main.json".into()],

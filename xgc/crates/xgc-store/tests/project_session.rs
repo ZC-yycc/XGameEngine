@@ -1,5 +1,6 @@
 //! 项目清单会话：只按登记过的相对路径读场景。
 
+use xgc_base::EntityId;
 use xgc_store::{
     load_project, save_project, save_world, ProjectContent, ProjectManifest, ProjectSession,
     PROJECT_FORMAT_VERSION,
@@ -22,6 +23,7 @@ fn temp(name: &str) -> std::path::PathBuf {
 fn manifest() -> ProjectManifest {
     ProjectManifest {
         format_version: PROJECT_FORMAT_VERSION,
+        next_entity_id: 2,
         name: "demo".to_string(),
         entry_scene: "scenes/main.json".to_string(),
         scenes: vec!["scenes/main.json".to_string()],
@@ -63,6 +65,73 @@ fn opens_a_directory_and_rejects_unregistered_scenes() {
     assert!(err.to_string().contains("没有登记"), "{err}");
     let err = session.scene_path("../escape.json").unwrap_err();
     assert!(err.to_string().contains("不合法"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn reservations_from_concurrent_sessions_are_disjoint_and_preserve_project_changes() {
+    let dir = temp("concurrent-ids");
+    let path = dir.join("project.xgc");
+    let original = manifest();
+    save_project(&path, &original).unwrap();
+    let mut first = ProjectSession::open(&dir).unwrap();
+    let mut second = ProjectSession::open(&path).unwrap();
+    let mut edited = original.clone();
+    edited.name = "在发号前改名".into();
+    save_project(&path, &edited).unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    let mut ranges = std::thread::scope(|scope| {
+        let a = scope.spawn(|| {
+            barrier.wait();
+            first.reserve_entity_ids(8, EntityId::from_raw(2)).unwrap()
+        });
+        let b = scope.spawn(|| {
+            barrier.wait();
+            second.reserve_entity_ids(8, EntityId::from_raw(2)).unwrap()
+        });
+        [a.join().unwrap(), b.join().unwrap()]
+    });
+    ranges.sort_by_key(|range| range.start);
+    assert_eq!(ranges, [2..10, 10..18]);
+    let mut on_disk = edited;
+    on_disk.next_entity_id = 18;
+    assert_eq!(load_project(&path).unwrap(), on_disk);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(save_project(&path, &original)
+        .unwrap_err()
+        .to_string()
+        .contains("不能回退"));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn reserves_last_id_and_rejects_exhaustion_without_advancing() {
+    let dir = temp("exhausted-ids");
+    let path = dir.join("project.xgc");
+    let mut manifest = manifest();
+    manifest.next_entity_id = EntityId::MAX_ASSIGNABLE_RAW;
+    save_project(&path, &manifest).unwrap();
+    let mut session = ProjectSession::open(&dir).unwrap();
+    let last = EntityId::from_raw(EntityId::MAX_ASSIGNABLE_RAW);
+    let original = std::fs::read(&path).unwrap();
+    assert!(session
+        .reserve_entity_ids(2, last)
+        .unwrap_err()
+        .to_string()
+        .contains("耗尽"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(
+        session.reserve_entity_ids(1, last).unwrap(),
+        last.raw()..u64::MAX
+    );
+    let exhausted = std::fs::read(&path).unwrap();
+    assert!(session
+        .reserve_entity_ids(1, last)
+        .unwrap_err()
+        .to_string()
+        .contains("耗尽"));
+    assert_eq!(std::fs::read(&path).unwrap(), exhausted);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
