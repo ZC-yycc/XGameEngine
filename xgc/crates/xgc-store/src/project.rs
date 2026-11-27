@@ -17,8 +17,15 @@ use xgc_base::path::normalize_project_relative;
 use xgc_base::render_settings::{RenderQuality, RenderSettings};
 use xgc_base::EntityId;
 
-use crate::{load_world, replace_world_if_unchanged, write_atomic_checked, Result, StoreError};
+use crate::{
+    load_world, load_world_with_bytes, replace_world_if_unchanged, write_atomic_checked, Result,
+    StoreError,
+};
 use xgc_world::WorldData;
+
+mod prefab_apply;
+pub(crate) use prefab_apply::save_value_prefab_if_unchanged;
+pub use prefab_apply::PrefabSceneChange;
 
 /// 清单格式版本；新增必填字段必须同时上调。
 pub const PROJECT_FORMAT_VERSION: u32 = 2;
@@ -131,7 +138,7 @@ pub fn save_project(path: &Path, manifest: &ProjectManifest) -> Result<()> {
     manifest.validate()?;
     let root = project_parent(path);
     fs::create_dir_all(root)?;
-    let _lock = lock_project(root)?;
+    let _lock = lock_recovered_project(root)?;
     match fs::symlink_metadata(path) {
         Ok(_) => {
             let path = checked_manifest_path(path, root)?;
@@ -193,6 +200,12 @@ fn lock_project(root: &Path) -> Result<File> {
         .truncate(false)
         .open(root.join(PROJECT_LOCK))?;
     lock.lock()?;
+    Ok(lock)
+}
+
+fn lock_recovered_project(root: &Path) -> Result<File> {
+    let lock = lock_project(root)?;
+    prefab_apply::recover_pending(root)?;
     Ok(lock)
 }
 
@@ -273,7 +286,7 @@ impl ProjectSession {
         world_next_id: EntityId,
         end: impl FnOnce(&Self, &ProjectManifest) -> Result<u64>,
     ) -> Result<Range<u64>> {
-        let _lock = lock_project(project_parent(&self.manifest_path))?;
+        let _lock = lock_recovered_project(project_parent(&self.manifest_path))?;
         let bytes = fs::read(&self.manifest_path)?;
         let mut manifest = decode_manifest(&bytes)?;
         let start = manifest.next_entity_id;
@@ -372,11 +385,7 @@ impl ProjectSession {
 
     /// 作者会话同时保存解析后的路径与磁盘原文，避免链接改指后写到另一关。
     pub fn canonical_scene_path(&self, scene: &str) -> Result<PathBuf> {
-        let path = self.scene_path(scene)?.canonicalize()?;
-        if !path.starts_with(project_parent(&self.manifest_path)) || !path.is_file() {
-            return Err(StoreError::Format("场景必须是项目根目录内的文件".into()));
-        }
-        Ok(path)
+        self.canonical_registered_scene(&self.manifest, scene)
     }
 
     /// 删除文件或解除登记后，对原路径的请求仍属于原作者会话。
@@ -398,15 +407,28 @@ impl ProjectSession {
         scene: &str,
         expected_path: &Path,
     ) -> Result<PathBuf> {
+        let path = self.canonical_registered_scene(manifest, scene)?;
+        if !same_location(&path, expected_path) {
+            return Err(StoreError::Format("场景路径已变；请重新打开项目".into()));
+        }
+        Ok(path)
+    }
+
+    fn canonical_registered_scene(
+        &self,
+        manifest: &ProjectManifest,
+        scene: &str,
+    ) -> Result<PathBuf> {
         let normalized = manifest.normalized("scenes", scene)?;
         if !manifest.scenes.iter().any(|registered| {
             normalize_project_relative(registered).is_ok_and(|known| known == normalized)
         }) {
             return Err(StoreError::Format("场景登记已变；请重新打开项目".into()));
         }
-        let path = self.canonical_scene_path(scene)?;
-        if !same_location(&path, expected_path) {
-            return Err(StoreError::Format("场景路径已变；请重新打开项目".into()));
+        let root = project_parent(&self.manifest_path);
+        let path = root.join(normalized).canonicalize()?;
+        if !path.starts_with(root) || !path.is_file() {
+            return Err(StoreError::Format("场景必须是项目根目录内的文件".into()));
         }
         Ok(path)
     }
@@ -420,21 +442,21 @@ impl ProjectSession {
         expected: &[u8],
     ) -> Result<Vec<u8>> {
         let root = project_parent(&self.manifest_path);
-        let _lock = lock_project(root)?;
+        let _lock = lock_recovered_project(root)?;
         let manifest = load_project(&self.manifest_path)?;
         let canonical = self.current_scene_path(&manifest, scene, expected_path)?;
-        if data.next_id > manifest.next_entity_id
-            || data
-                .entities
-                .iter()
-                .any(|entity| entity.id.raw() >= manifest.next_entity_id)
-        {
-            return Err(StoreError::Format(format!(
-                "场景使用了尚未预留的实体 ID（next_entity_id={}）",
-                manifest.next_entity_id
-            )));
-        }
+        check_reserved_ids(data, &manifest, "场景")?;
         replace_world_if_unchanged(&canonical, data, expected)
+    }
+
+    /// 一次持锁完成恢复、场景登记复核和磁盘基准读取，避免载入尚未提交的内容。
+    pub fn load_scene_for_authoring(&self, scene: &str) -> Result<(PathBuf, WorldData, Vec<u8>)> {
+        let root = project_parent(&self.manifest_path);
+        let _lock = lock_recovered_project(root)?;
+        let manifest = load_project(&self.manifest_path)?;
+        let path = self.canonical_registered_scene(&manifest, scene)?;
+        let (data, bytes) = load_world_with_bytes(&path)?;
+        Ok((path, data, bytes))
     }
 
     pub fn load_scene(&self, scene: &str) -> Result<WorldData> {
@@ -444,6 +466,21 @@ impl ProjectSession {
     pub fn load_entry(&self) -> Result<WorldData> {
         self.load_scene(&self.manifest.entry_scene)
     }
+}
+
+fn check_reserved_ids(data: &WorldData, manifest: &ProjectManifest, kind: &str) -> Result<()> {
+    if data.next_id > manifest.next_entity_id
+        || data
+            .entities
+            .iter()
+            .any(|entity| entity.id.raw() >= manifest.next_entity_id)
+    {
+        return Err(StoreError::Format(format!(
+            "{kind}使用了尚未预留的实体 ID（next_entity_id={}）",
+            manifest.next_entity_id
+        )));
+    }
+    Ok(())
 }
 
 fn resolved_location(path: &Path) -> Result<PathBuf> {

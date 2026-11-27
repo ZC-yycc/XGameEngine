@@ -1,12 +1,14 @@
 //! 编辑器从原生预制体文件实例化，按选中实体的来源还原或写回。
 
+mod apply;
+
 use std::path::{Path, PathBuf};
 
 use xgc_base::{path::normalize_project_relative, EntityId};
-use xgc_store::{load_prefab, load_prefab_with_bytes, save_prefab_if_unchanged};
+use xgc_store::load_prefab;
 use xgc_world::{
-    apply_prefab_values, instantiate_prefab, instantiate_prefab_with_ids, revert_prefab,
-    revert_prefab_with_ids, Component, Parent, PrefabInstance,
+    instantiate_prefab, instantiate_prefab_with_ids, revert_prefab, revert_prefab_with_ids,
+    Component, Parent, PrefabInstance,
 };
 
 use crate::{AssetKind, EditorState};
@@ -108,26 +110,6 @@ impl EditorState {
 
     pub(crate) fn can_apply_prefab(&self) -> bool {
         self.file.is_some() && self.can_revert_prefab()
-    }
-
-    /// 把已有实体与组件的值写回来源预制体，场景编辑历史仍由本会话持有。
-    pub fn apply_selected_prefab(&self) -> Result<usize, String> {
-        if self.is_playing() {
-            return Err("Play 期间不能 Apply 预制体".into());
-        }
-        let file = self.file.as_ref().ok_or("请先保存场景再 Apply 预制体")?;
-        let (selected, path) = self.selected_prefab_path()?;
-        let (asset, expected) =
-            load_prefab_with_bytes(&path).map_err(|err| format!("读取预制体失败：{err}"))?;
-        let candidate = apply_prefab_values(&self.world, &asset, selected)?;
-        let current =
-            std::fs::read(&file.path).map_err(|err| format!("读取当前场景失败：{err}"))?;
-        if current != file.bytes {
-            return Err("当前场景已被外部修改；请重新打开后再 Apply".into());
-        }
-        save_prefab_if_unchanged(&path, &candidate, &expected)
-            .map_err(|err| format!("写回预制体失败：{err}"))?;
-        Ok(candidate.entities.len())
     }
 
     fn selected_prefab_path(&self) -> Result<(EntityId, PathBuf), String> {

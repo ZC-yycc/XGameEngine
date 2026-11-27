@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as Json};
-use xgc_store::{load_world, load_world_with_bytes, save_snapshot, ProjectSession};
+use xgc_store::{load_world, save_snapshot, ProjectSession};
 use xgc_world::{Command, Plan};
 
 use crate::{required_str, Agent};
@@ -20,10 +20,9 @@ impl Agent {
         let path = Path::new(required_str(params, "path")?);
         let project = ProjectSession::containing_scene(path).map_err(|err| err.to_string())?;
         let (data, binding) = if let Some((session, scene)) = project {
-            let path = session
-                .canonical_scene_path(&scene)
+            let (path, data, bytes) = session
+                .load_scene_for_authoring(&scene)
                 .map_err(|err| err.to_string())?;
-            let (data, bytes) = load_world_with_bytes(&path).map_err(|err| err.to_string())?;
             let binding = ProjectScene {
                 session,
                 scene,

@@ -133,31 +133,28 @@ impl EditorState {
             || path
                 .file_name()
                 .is_some_and(|name| name == std::ffi::OsStr::new("project.xgc"));
-        let (scene_path, project, scene) = if is_project {
+        let binding = if is_project {
             let session =
                 ProjectSession::open(path).map_err(|err| format!("读取项目失败：{err}"))?;
-            let scene = session.entry_scene().to_string();
-            let scene_path = session
-                .canonical_scene_path(&scene)
-                .map_err(|err| format!("读取入口场景失败：{err}"))?;
-            (scene_path, Some(session), Some(scene))
-        } else if let Some((session, scene)) = ProjectSession::containing_scene(path)
-            .map_err(|err| format!("读取所属项目失败：{err}"))?
-        {
-            let scene_path = session
-                .canonical_scene_path(&scene)
-                .map_err(|err| format!("读取场景失败：{err}"))?;
-            (scene_path, Some(session), Some(scene))
+            let scene = session.entry_scene().to_owned();
+            Some((session, scene))
         } else {
-            (path.to_path_buf(), None, None)
+            ProjectSession::containing_scene(path)
+                .map_err(|err| format!("读取所属项目失败：{err}"))?
         };
-        let (data, bytes) = load_world_with_bytes(&scene_path).map_err(|err| {
-            if is_project {
-                format!("读取入口场景失败：{err}")
-            } else {
-                format!("读取世界失败：{err}")
-            }
-        })?;
+        let (scene_path, data, bytes) = if let Some((session, scene)) = &binding {
+            session.load_scene_for_authoring(scene).map_err(|err| {
+                if is_project {
+                    format!("读取入口场景失败：{err}")
+                } else {
+                    format!("读取场景失败：{err}")
+                }
+            })?
+        } else {
+            let (data, bytes) =
+                load_world_with_bytes(path).map_err(|err| format!("读取世界失败：{err}"))?;
+            (path.to_path_buf(), data, bytes)
+        };
         let mut world = World::new();
         world
             .restore_world_data(&data)
@@ -167,8 +164,10 @@ impl EditorState {
             path: scene_path,
             bytes,
         });
-        state.project = project;
-        state.scene = scene;
+        if let Some((session, scene)) = binding {
+            state.project = Some(session);
+            state.scene = Some(scene);
+        }
         Ok(state)
     }
 

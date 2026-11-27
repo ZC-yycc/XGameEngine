@@ -6,8 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use xgc_base::EntityId;
 use xgc_editor::EditorState;
-use xgc_store::{save_prefab, save_project, save_world, ProjectContent, ProjectManifest};
-use xgc_world::{ComponentData, EntityData, Parent, PrefabInstance, Transform, WorldData};
+use xgc_store::{
+    load_prefab, load_world, save_prefab, save_project, save_world, ProjectContent, ProjectManifest,
+};
+use xgc_world::{
+    Component, ComponentData, EntityData, Name, Parent, PrefabInstance, Transform, Value, WorldData,
+};
 
 const FIRST_SCENE: &str = "scenes/a.json";
 const SECOND_SCENE: &str = "scenes/b.json";
@@ -163,6 +167,156 @@ fn scene_save_rejects_a_stale_editor_and_keeps_its_draft() {
         .iter()
         .any(|entity| entity.id.raw() == 12));
     assert_eq!(fs::read(&a).unwrap(), before);
+}
+
+#[test]
+fn structural_apply_detaches_removed_source_members_across_registered_scenes() {
+    let fixture = Fixture::new();
+    let a = fixture.0.join(FIRST_SCENE);
+    let b = fixture.0.join(SECOND_SCENE);
+    let path = fixture.0.join(PREFAB);
+    let meta = fixture.0.join(format!("{PREFAB}.meta"));
+    let manifest = fixture.0.join("project.xgc");
+    save_world(&a, &document(1)).unwrap();
+    save_world(&b, &document(2)).unwrap();
+    let mut asset = document(3);
+    asset.entities[0].components = vec![ComponentData::from_component(&Name {
+        value: "原资产根".into(),
+    })];
+    let source_child = EntityId::from_raw(4);
+    asset.entities.push(EntityData {
+        id: source_child,
+        revision: 0,
+        components: vec![
+            ComponentData::from_component(&Name {
+                value: "资产子节点".into(),
+            }),
+            ComponentData::from_component(&Parent {
+                entity: EntityId::from_raw(3),
+            }),
+        ],
+    });
+    save_prefab(&path, &asset).unwrap();
+    let meta_bytes = format!("(guid: \"{GUID}\")");
+    fs::write(&meta, &meta_bytes).unwrap();
+    fixture.save_manifest();
+
+    let mut first = EditorState::open(&a).unwrap();
+    let mut second = EditorState::open(&b).unwrap();
+    let root = first.instantiate_prefab_file(Path::new(PREFAB)).unwrap();
+    let other_root = second.instantiate_prefab_file(Path::new(PREFAB)).unwrap();
+    let child = EntityId::from_raw(root.raw() + 1);
+    let other_child = EntityId::from_raw(other_root.raw() + 1);
+    second
+        .edit_field(
+            other_child,
+            Name::ID.0,
+            "value",
+            Value::String("另一场景自行改名".into()),
+        )
+        .unwrap();
+    second
+        .edit_field(
+            other_child,
+            PrefabInstance::ID.0,
+            "source",
+            Value::String(PREFAB.into()),
+        )
+        .unwrap();
+    first.save().unwrap();
+    second.save().unwrap();
+    let later = second.world().entity_data(other_child).unwrap();
+    let high_water = fs::read(&manifest).unwrap();
+    first
+        .edit_field(
+            root,
+            Name::ID.0,
+            "value",
+            Value::String("写入资产的草稿名称".into()),
+        )
+        .unwrap();
+    first.select(Some(child));
+    first.delete_selected().unwrap();
+    first.select(Some(root));
+
+    let dependent_path = fixture.0.join("Prefabs/dependent.prefab.json");
+    let mut dependent = document(5);
+    dependent.entities[0].components = vec![ComponentData::from_component(&PrefabInstance {
+        source: format!("guid://{GUID}"),
+        source_id: source_child.raw(),
+        root: true,
+    })];
+    save_prefab(&dependent_path, &dependent).unwrap();
+    let files = [&path, &a, &b, &dependent_path];
+    let before = files.map(|path| fs::read(path).unwrap());
+    let draft = first.world().world_data();
+    let error = first.apply_selected_prefab().unwrap_err();
+    assert!(error.contains("dependent.prefab.json"), "{error}");
+    assert_eq!(files.map(|path| fs::read(path).unwrap()), before);
+    assert_eq!(first.world().world_data(), draft);
+    assert!(!fixture.0.join(".xgc-prefab-apply.pending").exists());
+    fs::remove_file(dependent_path).unwrap();
+
+    assert_eq!(first.apply_selected_prefab().unwrap(), 1);
+    let applied = load_prefab(&path).unwrap();
+    assert_eq!(applied.next_id, asset.next_id);
+    assert_eq!(applied.entities[0].id, asset.entities[0].id);
+    assert_eq!(
+        applied.entities[0].components[0].fields[0].1.as_string(),
+        Some("写入资产的草稿名称")
+    );
+    assert_eq!(fs::read(&manifest).unwrap(), high_water);
+    assert_eq!(fs::read_to_string(&meta).unwrap(), meta_bytes);
+
+    let first_saved = load_world(&a).unwrap();
+    let saved_root = first_saved
+        .entities
+        .iter()
+        .find(|entity| entity.id == root)
+        .unwrap();
+    let saved_name = saved_root
+        .components
+        .iter()
+        .find(|component| component.component == Name::ID)
+        .unwrap();
+    assert_eq!(saved_name.fields[0].1.as_string(), Some("原资产根"));
+    assert!(first_saved.entities.iter().any(|entity| entity.id == child
+        && entity
+            .components
+            .iter()
+            .all(|component| component.component != PrefabInstance::ID)));
+    let second_saved = load_world(&b).unwrap();
+    let other_after = second_saved
+        .entities
+        .iter()
+        .find(|entity| entity.id == other_child)
+        .unwrap();
+    assert_eq!(
+        other_after.components,
+        later
+            .components
+            .into_iter()
+            .filter(|component| component.component != PrefabInstance::ID)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        second_saved
+            .entities
+            .iter()
+            .find(|entity| entity.id == other_root)
+            .unwrap(),
+        &second.world().entity_data(other_root).unwrap()
+    );
+
+    assert!(first.is_dirty());
+    assert!(first.world().key(child).is_none());
+    assert!(first.undo().unwrap());
+    assert!(first
+        .world()
+        .get::<PrefabInstance>(first.world().key(child).unwrap())
+        .is_none());
+    first.save().unwrap();
+    assert!(second.save().unwrap_err().contains("外部修改"));
 }
 
 fn document(id: u64) -> WorldData {

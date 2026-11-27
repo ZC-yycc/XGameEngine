@@ -2,7 +2,6 @@
 //!
 //! 脏场景与 Play 期间一律拒绝：静默丢改动救不回来，Play 世界和编辑世界是两份数据。
 
-use xgc_store::load_world_with_bytes;
 use xgc_world::World;
 
 use crate::{EditorState, SceneFile};
@@ -35,11 +34,9 @@ impl EditorState {
             .project
             .as_ref()
             .ok_or_else(|| "当前不是项目，无法切换场景".to_string())?;
-        let path = session
-            .canonical_scene_path(scene)
+        let (path, data, bytes) = session
+            .load_scene_for_authoring(scene)
             .map_err(|err| format!("读取场景失败：{err}"))?;
-        let (data, bytes) =
-            load_world_with_bytes(&path).map_err(|err| format!("读取场景失败：{err}"))?;
         let mut world = World::new();
         world
             .restore_world_data(&data)

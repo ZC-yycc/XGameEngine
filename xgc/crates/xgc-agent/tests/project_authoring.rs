@@ -146,6 +146,61 @@ fn project_scene_save_rejects_a_removed_file_or_registration() {
     assert_eq!(std::fs::read(&path).unwrap(), baseline);
 }
 
+#[test]
+fn world_load_recovers_an_interrupted_prefab_apply_before_editing() {
+    let fixture = Project::new();
+    let scene = fixture.path(FIRST);
+    let other = fixture.path(SECOND);
+    let prefab_name = "Prefabs/root.prefab.json";
+    let prefab = fixture.path(prefab_name);
+    let original_scene = std::fs::read_to_string(&scene).unwrap();
+    let original_other = std::fs::read(&other).unwrap();
+    let data = WorldData {
+        revision: 3,
+        next_id: 10,
+        entities: vec![EntityData::new(EntityId::from_raw(3))],
+        ..WorldData::default()
+    };
+    xgc_store::save_prefab(&prefab, &data).unwrap();
+    let original_prefab = std::fs::read_to_string(&prefab).unwrap();
+    let interrupted = |original: &str| {
+        let mut envelope: Json = serde_json::from_str(original).unwrap();
+        envelope["payload"]["revision"] = json!(4);
+        serde_json::to_string(&envelope).unwrap()
+    };
+    let applied_scene = interrupted(&original_scene);
+    let applied_prefab = interrupted(&original_prefab);
+    let journal = fixture.path(".xgc-prefab-apply.pending");
+    let format_version = serde_json::from_str::<Json>(&original_scene).unwrap();
+    let pending = json!({
+        "format_version": format_version["format_version"],
+        "kind": "prefab_apply",
+        "payload": {
+            "prefab": {"relative": prefab_name, "original": original_prefab, "applied": applied_prefab},
+            "scenes": [{"relative": FIRST, "original": original_scene, "applied": applied_scene}]
+        }
+    });
+    std::fs::write(&journal, pending.to_string()).unwrap();
+    std::fs::write(&prefab, applied_prefab).unwrap();
+    std::fs::write(&scene, applied_scene).unwrap();
+
+    let mut agent = Agent::new();
+    load(&mut agent, &scene);
+    assert_eq!(
+        result(&mut agent, "world.digest", Json::Null)["revision"],
+        3
+    );
+    assert!(!journal.exists());
+    assert_eq!(std::fs::read_to_string(&scene).unwrap(), original_scene);
+    assert_eq!(std::fs::read_to_string(&prefab).unwrap(), original_prefab);
+    assert_eq!(std::fs::read(&other).unwrap(), original_other);
+
+    let plan = spawn(&mut agent, 10);
+    result(&mut agent, "edit.apply", json!({"plan_id": plan}));
+    save(&mut agent, &scene);
+    assert_eq!(ids_on_disk(&scene), [1, 10]);
+}
+
 fn response(agent: &mut Agent, method: &str, params: Json) -> Json {
     let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
     let line = agent.handle_line(&request.to_string()).unwrap();

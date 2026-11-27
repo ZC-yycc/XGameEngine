@@ -1,12 +1,11 @@
 //! XGC 持久化：版本化 JSON 包络 + 原子写。
 //!
-//! 落盘入口只有这里：先写同目录临时文件、`sync_all`、再 rename。Windows 上
-//! `rename` 不覆盖已存在文件，因此目标存在时先删再 rename；这个窗口不是掉电
-//! 原子交换，和旧引擎 `fsx` 的边界一致，后续有目录事务时再补。
+//! 落盘先写同目录临时文件并 `sync_all`，再替换目标。条件写保留失败时的原文件，
+//! 项目多文件事务在替换之前另行发布可恢复日志。
 
 #![deny(unsafe_code)]
 
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +20,7 @@ const FORMAT_VERSION: u32 = 6;
 mod binary;
 pub use binary::{decode_world, encode_world, load_world_binary, save_world_binary};
 
-mod project;
+pub mod project;
 pub use project::{
     load_project, save_project, ProjectContent, ProjectManifest, ProjectSession,
     PROJECT_FORMAT_VERSION,
@@ -107,8 +106,7 @@ pub fn load_world_with_bytes(path: &Path) -> Result<(WorldData, Vec<u8>)> {
 }
 
 fn replace_world_if_unchanged(path: &Path, data: &WorldData, expected: &[u8]) -> Result<Vec<u8>> {
-    let bytes = encode("world", data)?;
-    decode::<WorldData>(&bytes, "world")?;
+    let bytes = checked_document_bytes("world", data)?;
     write_atomic_checked(
         path,
         &bytes,
@@ -121,17 +119,9 @@ pub fn save_prefab(path: &Path, data: &WorldData) -> Result<()> {
     save(path, "prefab", data).map(drop)
 }
 
-/// 用加载时的原文检查提交前的资产版本，再走同一暂存替换入口。
-/// 跨进程的写入仍可发生在检查与替换之间。
+/// 用加载时的原文检查提交前的资产版本。项目内单文件 Apply 共用项目锁。
 pub fn save_prefab_if_unchanged(path: &Path, data: &WorldData, expected: &[u8]) -> Result<()> {
-    let bytes = encode("prefab", data)?;
-    // serde_json 会把非有限浮点写成 null；必须在替换前确认写出的资产仍能加载。
-    decode::<WorldData>(&bytes, "prefab")?;
-    write_atomic_checked(
-        path,
-        &bytes,
-        Some((expected, "预制体已被外部修改；请重试 Apply")),
-    )
+    project::save_value_prefab_if_unchanged(path, data, expected)
 }
 
 pub fn load_prefab(path: &Path) -> Result<WorldData> {
@@ -162,6 +152,13 @@ fn encode<T: Serialize>(kind: &str, payload: &T) -> Result<Vec<u8>> {
         kind: kind.to_string(),
         payload,
     })?)
+}
+
+fn checked_document_bytes(kind: &str, data: &WorldData) -> Result<Vec<u8>> {
+    let bytes = encode(kind, data)?;
+    // serde_json 会把非有限浮点写成 null，先确认候选文件仍能加载。
+    decode::<WorldData>(&bytes, kind)?;
+    Ok(bytes)
 }
 
 fn load_with_bytes<T: DeserializeOwned>(path: &Path, expected_kind: &str) -> Result<(T, Vec<u8>)> {
@@ -206,18 +203,11 @@ fn write_atomic_checked(path: &Path, bytes: &[u8], expected: Option<(&[u8], &str
             fs::create_dir_all(parent)?;
         }
     }
-
-    let temp = temp_path(path);
-    let mut file = File::create(&temp)?;
-    let result = (|| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-
+    stage_and_replace(path, bytes, |temp| {
         if let Some((expected, conflict)) = expected {
             check_bytes(path, expected, conflict)?;
         }
-        match fs::rename(&temp, path) {
+        match fs::rename(temp, path) {
             // 条件替换失败时，保留原文件。
             Err(err)
                 if expected.is_none()
@@ -231,12 +221,29 @@ fn write_atomic_checked(path: &Path, bytes: &[u8], expected: Option<(&[u8], &str
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                     Err(err) => return Err(err.into()),
                 }
-                fs::rename(&temp, path)?;
+                fs::rename(temp, path)?;
             }
             result => result?,
         }
         Ok(())
-    })();
+    })
+}
+
+fn stage_and_replace(
+    path: &Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let temp = temp_path(path);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let staged = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = staged
+        .map_err(StoreError::from)
+        .and_then(|()| replace(&temp));
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }

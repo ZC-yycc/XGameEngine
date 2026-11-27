@@ -69,6 +69,31 @@ fn opens_a_directory_and_rejects_unregistered_scenes() {
 }
 
 #[test]
+fn authoring_load_checks_the_latest_scene_registration() {
+    let dir = temp("authoring-registration");
+    let path = dir.join("project.xgc");
+    let mut project = manifest();
+    let main = project.entry_scene.clone();
+    let other = "scenes/other.json";
+    project.scenes.push(other.into());
+    save_project(&path, &project).unwrap();
+    let world = World::new().world_data();
+    save_world(&dir.join(&main), &world).unwrap();
+    save_world(&dir.join(other), &world).unwrap();
+    let session = ProjectSession::open(&dir).unwrap();
+    let (_, _, original) = session.load_scene_for_authoring(&main).unwrap();
+
+    project.entry_scene = other.into();
+    project.scenes = vec![other.into()];
+    save_project(&path, &project).unwrap();
+    let error = session.load_scene_for_authoring(&main).unwrap_err();
+    assert!(error.to_string().contains("场景登记已变"), "{error}");
+    assert_eq!(std::fs::read(dir.join(&main)).unwrap(), original);
+    assert_eq!(session.load_scene_for_authoring(other).unwrap().1, world);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn reservations_from_concurrent_sessions_are_disjoint_and_preserve_project_changes() {
     let dir = temp("concurrent-ids");
     let path = dir.join("project.xgc");
