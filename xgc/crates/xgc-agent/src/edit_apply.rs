@@ -47,6 +47,7 @@ impl Agent {
             .plans
             .remove(&plan_id)
             .ok_or_else(|| format!("未知 plan_id：{plan_id}"))?;
+        self.claim_plan_ids(&plan)?;
         let record_index = self.journal.len();
         let applied = self
             .world

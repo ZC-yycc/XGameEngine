@@ -17,7 +17,8 @@ use xgc_base::path::normalize_project_relative;
 use xgc_base::render_settings::{RenderQuality, RenderSettings};
 use xgc_base::EntityId;
 
-use crate::{load_world, write_atomic_checked, Result, StoreError};
+use crate::{load_world, replace_world_if_unchanged, write_atomic_checked, Result, StoreError};
+use xgc_world::WorldData;
 
 /// 清单格式版本；新增必填字段必须同时上调。
 pub const PROJECT_FORMAT_VERSION: u32 = 2;
@@ -234,6 +235,44 @@ impl ProjectSession {
         count: usize,
         world_next_id: EntityId,
     ) -> Result<Range<u64>> {
+        self.advance_entity_ids(world_next_id, |_, manifest| {
+            u64::try_from(count)
+                .ok()
+                .and_then(|count| manifest.next_entity_id.checked_add(count))
+                .ok_or_else(|| StoreError::Format("项目实体 ID 已耗尽".into()))
+        })
+    }
+
+    /// 提交端保留计划中显式指定的 ID。跳过的号随本次水位前移一起保留。
+    pub fn claim_scene_entity_ids(
+        &mut self,
+        scene: &str,
+        expected_path: &Path,
+        first: EntityId,
+        last: EntityId,
+        world_next_id: EntityId,
+    ) -> Result<()> {
+        if first > last || last.validate().is_err() {
+            return Err(StoreError::Format("项目实体 ID 范围不合法".into()));
+        }
+        self.advance_entity_ids(world_next_id, |session, manifest| {
+            session.current_scene_path(manifest, scene, expected_path)?;
+            let start = manifest.next_entity_id;
+            if first.raw() < start {
+                return Err(StoreError::Format(format!(
+                    "实体 ID {first} 低于项目水位 next_entity_id={start}；请重新规划"
+                )));
+            }
+            Ok(last.raw() + 1)
+        })?;
+        Ok(())
+    }
+
+    fn advance_entity_ids(
+        &mut self,
+        world_next_id: EntityId,
+        end: impl FnOnce(&Self, &ProjectManifest) -> Result<u64>,
+    ) -> Result<Range<u64>> {
         let _lock = lock_project(project_parent(&self.manifest_path))?;
         let bytes = fs::read(&self.manifest_path)?;
         let mut manifest = decode_manifest(&bytes)?;
@@ -243,39 +282,42 @@ impl ProjectSession {
                 "项目 ID 水位落后于场景或当前会话".into(),
             ));
         }
-        let end = u64::try_from(count)
-            .ok()
-            .and_then(|count| start.checked_add(count))
-            .ok_or_else(|| StoreError::Format("项目实体 ID 已耗尽".into()))?;
-        manifest.next_entity_id = end;
-        write_manifest(&self.manifest_path, &manifest, Some(&bytes))?;
+        let end = end(self, &manifest)?;
+        if end != start {
+            manifest.next_entity_id = end;
+            write_manifest(&self.manifest_path, &manifest, Some(&bytes))?;
+        }
         self.manifest.next_entity_id = end;
         Ok(start..end)
     }
 
-    /// 从磁盘直开已登记场景时，同样采用项目级的编辑语义。
+    /// 查找已登记场景。文件缺失时仍按登记路径识别，保存入口才能发现冲突。
     pub fn containing_scene(path: &Path) -> Result<Option<(Self, String)>> {
-        let canonical = match path.canonicalize() {
-            Ok(path) => path,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        for root in canonical.ancestors().skip(1) {
+        let requested = std::path::absolute(path)?;
+        let target = resolved_location(&requested)?;
+        let roots = requested.ancestors().skip(1).chain(
+            (target != requested)
+                .then_some(target.as_path())
+                .into_iter()
+                .flat_map(|path| path.ancestors().skip(1)),
+        );
+        for root in roots {
             let manifest = root.join(PROJECT_FILE);
-            match fs::metadata(&manifest) {
+            match fs::symlink_metadata(&manifest) {
                 Ok(_) => {}
                 Err(err) if err.kind() == ErrorKind::NotFound => continue,
                 Err(err) => return Err(err.into()),
             }
             let session = Self::open(&manifest)?;
             for scene in &session.manifest.scenes {
-                match session.scene_path(scene)?.canonicalize() {
-                    Ok(path) if path == canonical => {
-                        return Ok(Some((session.clone(), scene.clone())))
+                let declared = session.scene_path(scene)?;
+                let resolved = resolved_location(&declared)?;
+                if same_location(&declared, &requested) || same_location(&resolved, &target) {
+                    if !resolved.starts_with(project_parent(&session.manifest_path)) {
+                        return Err(StoreError::Format("场景必须位于项目根目录内".into()));
                     }
-                    Ok(_) => {}
-                    Err(err) if err.kind() == ErrorKind::NotFound => {}
-                    Err(err) => return Err(err.into()),
+                    let scene = scene.clone();
+                    return Ok(Some((session, scene)));
                 }
             }
         }
@@ -328,11 +370,105 @@ impl ProjectSession {
         Ok(self.root.join(scene))
     }
 
-    pub fn load_scene(&self, scene: &str) -> Result<xgc_world::WorldData> {
+    /// 作者会话同时保存解析后的路径与磁盘原文，避免链接改指后写到另一关。
+    pub fn canonical_scene_path(&self, scene: &str) -> Result<PathBuf> {
+        let path = self.scene_path(scene)?.canonicalize()?;
+        if !path.starts_with(project_parent(&self.manifest_path)) || !path.is_file() {
+            return Err(StoreError::Format("场景必须是项目根目录内的文件".into()));
+        }
+        Ok(path)
+    }
+
+    /// 删除文件或解除登记后，对原路径的请求仍属于原作者会话。
+    pub fn matches_scene_location(
+        &self,
+        scene: &str,
+        expected_path: &Path,
+        requested: &Path,
+    ) -> Result<bool> {
+        let requested = std::path::absolute(requested)?;
+        let declared = std::path::absolute(self.scene_path(scene)?)?;
+        Ok(same_location(&declared, &requested)
+            || same_location(expected_path, &resolved_location(&requested)?))
+    }
+
+    fn current_scene_path(
+        &self,
+        manifest: &ProjectManifest,
+        scene: &str,
+        expected_path: &Path,
+    ) -> Result<PathBuf> {
+        let normalized = manifest.normalized("scenes", scene)?;
+        if !manifest.scenes.iter().any(|registered| {
+            normalize_project_relative(registered).is_ok_and(|known| known == normalized)
+        }) {
+            return Err(StoreError::Format("场景登记已变；请重新打开项目".into()));
+        }
+        let path = self.canonical_scene_path(scene)?;
+        if !same_location(&path, expected_path) {
+            return Err(StoreError::Format("场景路径已变；请重新打开项目".into()));
+        }
+        Ok(path)
+    }
+
+    /// 已登记场景的作者保存和 ID 分配串行使用同一把项目锁。
+    pub fn save_scene_if_unchanged(
+        &self,
+        scene: &str,
+        expected_path: &Path,
+        data: &WorldData,
+        expected: &[u8],
+    ) -> Result<Vec<u8>> {
+        let root = project_parent(&self.manifest_path);
+        let _lock = lock_project(root)?;
+        let manifest = load_project(&self.manifest_path)?;
+        let canonical = self.current_scene_path(&manifest, scene, expected_path)?;
+        if data.next_id > manifest.next_entity_id
+            || data
+                .entities
+                .iter()
+                .any(|entity| entity.id.raw() >= manifest.next_entity_id)
+        {
+            return Err(StoreError::Format(format!(
+                "场景使用了尚未预留的实体 ID（next_entity_id={}）",
+                manifest.next_entity_id
+            )));
+        }
+        replace_world_if_unchanged(&canonical, data, expected)
+    }
+
+    pub fn load_scene(&self, scene: &str) -> Result<WorldData> {
         load_world(&self.scene_path(scene)?)
     }
 
-    pub fn load_entry(&self) -> Result<xgc_world::WorldData> {
+    pub fn load_entry(&self) -> Result<WorldData> {
         self.load_scene(&self.manifest.entry_scene)
+    }
+}
+
+fn resolved_location(path: &Path) -> Result<PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                return Err(err.into());
+            };
+            // 不把断开的链接当成可直接创建的新文件。
+            match fs::symlink_metadata(path) {
+                Err(missing) if missing.kind() == ErrorKind::NotFound => {
+                    Ok(resolved_location(parent)?.join(name))
+                }
+                _ => Err(err.into()),
+            }
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn same_location(first: &Path, second: &Path) -> bool {
+    if cfg!(windows) {
+        first.to_string_lossy().to_lowercase() == second.to_string_lossy().to_lowercase()
+    } else {
+        first == second
     }
 }

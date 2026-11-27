@@ -6,17 +6,16 @@
 #![deny(unsafe_code)]
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use serde_json::{json, Value as Json};
 use xgc_reflect::{ComponentId, FieldPath, Registry};
-use xgc_store::{load_world, save_world};
 use xgc_world::{Applied, Command, Journal, Plan, World, WorldSnapshot};
 
 mod edit_apply;
 mod explain;
 mod mcp;
 mod methods;
+mod project_authoring;
 mod query;
 mod schemas;
 mod script_check;
@@ -43,6 +42,7 @@ pub struct Agent {
     apply_receipts: HashMap<String, edit_apply::ApplyReceipt>,
     journal: Journal,
     base: WorldSnapshot,
+    project_scene: Option<project_authoring::ProjectScene>,
     next_plan: u64,
     recorded_preview: Option<sim_run::RecordedPreview>,
     next_trace: u64,
@@ -68,6 +68,7 @@ impl Agent {
             apply_receipts: HashMap::new(),
             journal: Journal::new(),
             base,
+            project_scene: None,
             next_plan: 0,
             recorded_preview: None,
             next_trace: 0,
@@ -413,23 +414,6 @@ impl Agent {
                 "subject": diagnostic.subject.to_string(),
                 "message": diagnostic.message,
             })).collect::<Vec<_>>(),
-        }))
-    }
-
-    fn load(&mut self, params: &Json) -> Result<Json, String> {
-        let path = required_str(params, "path")?;
-        let data = load_world(Path::new(path)).map_err(|err| err.to_string())?;
-        self.replace_edit_world(&data, "恢复失败")
-    }
-
-    fn save(&self, params: &Json) -> Result<Json, String> {
-        let path = required_str(params, "path")?;
-        let data = self.world.world_data();
-        save_world(Path::new(path), &data).map_err(|err| err.to_string())?;
-        Ok(json!({
-            "path": path,
-            "revision": data.revision,
-            "entities": data.entities.len(),
         }))
     }
 

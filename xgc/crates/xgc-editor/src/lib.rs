@@ -20,7 +20,7 @@ use xgc_base::EntityId;
 use xgc_host::{FixedStepClock, ScriptedRunner};
 use xgc_reflect::{FieldSchema, Registry, Value};
 use xgc_sim::InputMap;
-use xgc_store::{load_world_with_bytes, save_world_with_bytes, ProjectSession};
+use xgc_store::{load_world_with_bytes, save_snapshot_with_bytes, ProjectSession};
 use xgc_world::{
     builtin_registry, Camera, Command, ComponentData, ComponentId, GlobalTransform, Material,
     MeshRenderer, Name, Transform, World, WorldData,
@@ -53,7 +53,7 @@ struct PlaySession {
 
 struct SceneFile {
     path: PathBuf,
-    /// 与当前编辑世界同一次加载或保存的原文，供预制体 Apply 确认场景版本。
+    /// 与编辑世界同一次加载或保存的原文，供项目保存和预制体 Apply 确认场景版本。
     bytes: Vec<u8>,
 }
 
@@ -138,13 +138,16 @@ impl EditorState {
                 ProjectSession::open(path).map_err(|err| format!("读取项目失败：{err}"))?;
             let scene = session.entry_scene().to_string();
             let scene_path = session
-                .scene_path(&scene)
-                .map_err(|err| format!("入口场景路径不合法：{err}"))?;
+                .canonical_scene_path(&scene)
+                .map_err(|err| format!("读取入口场景失败：{err}"))?;
             (scene_path, Some(session), Some(scene))
         } else if let Some((session, scene)) = ProjectSession::containing_scene(path)
             .map_err(|err| format!("读取所属项目失败：{err}"))?
         {
-            (path.to_path_buf(), Some(session), Some(scene))
+            let scene_path = session
+                .canonical_scene_path(&scene)
+                .map_err(|err| format!("读取场景失败：{err}"))?;
+            (scene_path, Some(session), Some(scene))
         } else {
             (path.to_path_buf(), None, None)
         };
@@ -542,8 +545,14 @@ impl EditorState {
             .file
             .as_mut()
             .ok_or_else(|| "尚未指定场景路径".to_string())?;
-        file.bytes = save_world_with_bytes(&file.path, &self.world.world_data())
-            .map_err(|err| format!("保存失败：{err}"))?;
+        let data = self.world.world_data();
+        file.bytes = match (&self.project, &self.scene) {
+            (Some(project), Some(scene)) => {
+                project.save_scene_if_unchanged(scene, &file.path, &data, &file.bytes)
+            }
+            _ => save_snapshot_with_bytes(&file.path, &data),
+        }
+        .map_err(|err| format!("保存失败：{err}"))?;
         self.dirty = false;
         Ok(())
     }
@@ -552,10 +561,22 @@ impl EditorState {
         if self.play.is_some() {
             return Err("Play 期间不能保存".to_string());
         }
-        let path = path.as_ref().to_path_buf();
-        let bytes = save_world_with_bytes(&path, &self.world.world_data())
+        let path = path.as_ref();
+        if let (Some(project), Some(scene), Some(file)) = (&self.project, &self.scene, &self.file) {
+            if project
+                .matches_scene_location(scene, &file.path, path)
+                .map_err(|err| format!("保存失败：{err}"))?
+            {
+                return self.save();
+            }
+        }
+        let bytes = save_snapshot_with_bytes(path, &self.world.world_data())
             .map_err(|err| format!("保存失败：{err}"))?;
-        self.file = Some(SceneFile { path, bytes });
+        self.file = Some(SceneFile {
+            path: path.to_path_buf(),
+            bytes,
+        });
+        self.scene = None;
         self.dirty = false;
         Ok(())
     }

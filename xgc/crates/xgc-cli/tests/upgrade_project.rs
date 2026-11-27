@@ -140,6 +140,55 @@ fn status(output: &Output, expected: i32) {
 }
 
 #[test]
+fn snapshot_commands_cannot_overwrite_a_registered_scene() {
+    let temp = Temp::new();
+    let old_project = temp.0.join("old");
+    let project = temp.0.join("native");
+    fixture(&old_project);
+    status(&migrate(&old_project, &project, false), 0);
+    let scene = project.join("scenes/main.json");
+    let baseline = fs::read(&scene).unwrap();
+    let old_scenes = temp.0.join("legacy-scenes");
+    let old_scene = old_scenes.join("main.ron");
+    fs::create_dir(&old_scenes).unwrap();
+    fs::write(&old_scene, "(format_version: 2, entities: [])").unwrap();
+
+    let export = |path: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_xgc"))
+            .arg("export")
+            .arg(path)
+            .output()
+            .unwrap()
+    };
+    let run = |path: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_xgc"))
+            .arg("run-scripts")
+            .arg(&scene)
+            .arg(&project)
+            .arg("1")
+            .arg(path)
+            .output()
+            .unwrap()
+    };
+    for (output, code) in [
+        (export(&scene), 1),
+        (run(&scene), 2),
+        (migrate(&old_scene, &scene, false), 1),
+        (migrate(&old_scenes, scene.parent().unwrap(), false), 1),
+    ] {
+        status(&output, code);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("已登记场景"));
+    }
+    assert_eq!(fs::read(&scene).unwrap(), baseline);
+    let detached = project.join("scenes/export.json");
+    status(&export(&detached), 0);
+    assert!(!load_world(&detached).unwrap().entities.is_empty());
+    status(&run(&detached), 0);
+    status(&migrate(&old_scene, &detached, false), 0);
+    assert!(load_world(&detached).unwrap().entities.is_empty());
+}
+
+#[test]
 fn upgrades_native_project_without_rewriting_worlds_or_guids() {
     let temp = Temp::new();
     let source = temp.0.join("source");

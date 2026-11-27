@@ -100,15 +100,15 @@ pub(super) static METHODS: &[Method] = &[
     ),
     Method::new(
         "world.load",
-        "从服务端文件系统读取 XGC 世界 JSON 并替换当前世界，重置计划和事务历史。",
+        "读取 XGC 世界 JSON 并重置计划与事务历史。已登记的项目场景还返回十进制 next_entity_id。",
         schemas::world_path,
         Agent::load,
     ),
     Method::new(
         "world.save",
-        "将当前世界以 XGC 世界 JSON 格式写到服务端路径，允许覆盖已有文件。",
+        "保存 XGC 世界 JSON。写回项目场景时须先加载该场景，并核对加载后的磁盘原文。",
         schemas::world_path,
-        |agent, params| agent.save(params),
+        Agent::save,
     ),
     Method::new(
         "world.snapshot",

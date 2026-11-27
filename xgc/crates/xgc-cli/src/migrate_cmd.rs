@@ -11,7 +11,7 @@ use xgc_migrate::{
     migrate_dir, migrate_old_project, migrate_str, render_lua_api_report, ProjectMigrationError,
 };
 use xgc_script::mounted_lua_api;
-use xgc_store::save_world;
+use xgc_store::save_snapshot;
 
 pub(crate) fn migrate(input: Option<&str>, output: Option<&str>, flag: Option<&str>) -> ExitCode {
     let dry_run = match flag {
@@ -89,7 +89,7 @@ pub(crate) fn migrate(input: Option<&str>, output: Option<&str>, flag: Option<&s
     let suffix = if dry_run {
         "（dry-run，未写盘）"
     } else {
-        if let Err(err) = save_world(Path::new(output), &data) {
+        if let Err(err) = save_snapshot(Path::new(output), &data) {
             eprintln!("写入迁移结果失败：{err}");
             return ExitCode::from(1);
         }

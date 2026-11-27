@@ -130,6 +130,41 @@ fn revert_reserves_ids_only_for_new_prefab_members() {
     );
 }
 
+#[test]
+fn scene_save_rejects_a_stale_editor_and_keeps_its_draft() {
+    let fixture = Fixture::new();
+    let a = fixture.0.join(FIRST_SCENE);
+    let b = fixture.0.join(SECOND_SCENE);
+    save_world(&a, &document(1)).unwrap();
+    save_world(&b, &document(2)).unwrap();
+    fixture.save_manifest();
+
+    let mut first = EditorState::open(&a).unwrap();
+    let mut stale = EditorState::open(&a).unwrap();
+    first.spawn_entity("先保存的会话").unwrap();
+    stale.spawn_entity("未保存的草稿").unwrap();
+    first.save().unwrap();
+    let before = fs::read(&a).unwrap();
+    assert!(stale.save().unwrap_err().contains("外部修改"));
+    assert!(stale.is_dirty());
+    assert!(stale.world().key(EntityId::from_raw(11)).is_some());
+    assert_eq!(fs::read(&a).unwrap(), before);
+
+    let other = fs::read(&b).unwrap();
+    assert!(stale.save_as(&b).is_err());
+    assert_eq!(fs::read(&b).unwrap(), other);
+    let export = fixture.0.join("draft.json");
+    stale.save_as(&export).unwrap();
+    stale.spawn_entity("继续保存独立草稿").unwrap();
+    stale.save().unwrap();
+    assert!(xgc_store::load_world(&export)
+        .unwrap()
+        .entities
+        .iter()
+        .any(|entity| entity.id.raw() == 12));
+    assert_eq!(fs::read(&a).unwrap(), before);
+}
+
 fn document(id: u64) -> WorldData {
     WorldData {
         next_id: 10,

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use xgc_asset::CookRuntime;
 use xgc_host::{asset_paths, ScriptedRunner};
-use xgc_store::{load_project, save_world, StoreError};
+use xgc_store::{load_project, save_snapshot, StoreError};
 use xgc_world::World;
 
 use crate::world_cmd::{load_world_state, parse_frames};
@@ -107,7 +107,7 @@ pub(crate) fn run_scripts(
         world.state_hash()
     );
     if let Some(output) = output {
-        if let Err(err) = save_world(Path::new(output), &record) {
+        if let Err(err) = save_snapshot(Path::new(output), &record) {
             eprintln!("写出世界失败：{err}");
             return ExitCode::from(2);
         }

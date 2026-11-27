@@ -10,7 +10,7 @@ use xgc_asset::scan as scan_assets;
 use xgc_reflect::Registry;
 use xgc_script::LuaHost;
 use xgc_sim::{play, write_wav_mono, AudioLibrary, Scenario, SoftwareMixer};
-use xgc_store::{load_world, save_world};
+use xgc_store::{load_world, save_snapshot};
 use xgc_world::{Name, Transform, Velocity, World};
 
 mod assets_cmd;
@@ -209,7 +209,7 @@ fn export(path: Option<&str>) -> ExitCode {
     };
     let world = demo_world();
     let data = world.world_data();
-    match save_world(Path::new(path), &data) {
+    match save_snapshot(Path::new(path), &data) {
         Ok(()) => {
             println!(
                 "export: {} 个实体，revision {} -> {path}",

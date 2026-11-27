@@ -33,7 +33,7 @@ pub fn migrate_dir(input: &Path, output: &Path) -> Result<MigrationBatch, Migrat
                     .map(|stem| stem.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "scene".to_string());
                 let target = output.join(format!("{stem}.json"));
-                if let Err(err) = xgc_store::save_world(&target, &data) {
+                if let Err(err) = xgc_store::save_snapshot(&target, &data) {
                     batch
                         .failures
                         .push(format!("{}：写入失败 {err}", path.display()));

@@ -84,12 +84,37 @@ pub fn save_world_with_bytes(path: &Path, data: &WorldData) -> Result<Vec<u8>> {
     save(path, "world", data)
 }
 
+/// 独立快照没有项目的加载基准，不能覆盖登记场景。
+pub fn save_snapshot(path: &Path, data: &WorldData) -> Result<()> {
+    save_snapshot_with_bytes(path, data).map(drop)
+}
+
+pub fn save_snapshot_with_bytes(path: &Path, data: &WorldData) -> Result<Vec<u8>> {
+    if let Some((_, scene)) = ProjectSession::containing_scene(path)? {
+        return Err(StoreError::Format(format!(
+            "{scene} 是已登记场景；请先打开场景再保存"
+        )));
+    }
+    save_world_with_bytes(path, data)
+}
+
 pub fn load_world(path: &Path) -> Result<WorldData> {
     load_world_with_bytes(path).map(|(data, _)| data)
 }
 
 pub fn load_world_with_bytes(path: &Path) -> Result<(WorldData, Vec<u8>)> {
     load_with_bytes(path, "world")
+}
+
+fn replace_world_if_unchanged(path: &Path, data: &WorldData, expected: &[u8]) -> Result<Vec<u8>> {
+    let bytes = encode("world", data)?;
+    decode::<WorldData>(&bytes, "world")?;
+    write_atomic_checked(
+        path,
+        &bytes,
+        Some((expected, "场景已被外部修改；请重新打开场景")),
+    )?;
+    Ok(bytes)
 }
 
 pub fn save_prefab(path: &Path, data: &WorldData) -> Result<()> {

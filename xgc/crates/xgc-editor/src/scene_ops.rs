@@ -36,7 +36,7 @@ impl EditorState {
             .as_ref()
             .ok_or_else(|| "当前不是项目，无法切换场景".to_string())?;
         let path = session
-            .scene_path(scene)
+            .canonical_scene_path(scene)
             .map_err(|err| format!("读取场景失败：{err}"))?;
         let (data, bytes) =
             load_world_with_bytes(&path).map_err(|err| format!("读取场景失败：{err}"))?;

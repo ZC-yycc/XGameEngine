@@ -137,7 +137,11 @@ RTX 2060 / Vulkan / 610.88 在 800×450、4× MSAA 的离屏视口输出 1 个�
 
 原生 `project.xgc` 第 2 版必填 `next_entity_id`。从引擎旧项目迁移时，水位高于所有迁出的场景和预制体实体。升级原生第 1 版时，运行 `xgc migrate <v1 项目目录> <新目录> --dry-run` 先检查场景、递归预制体和水位，去掉 `--dry-run` 后将项目复制到新目录并写入第 2 版清单，再运行 `xgc check <新目录>`。升级用文档游标和最大实体 ID 加一共同计算水位，保留世界文件、GUID 和相对路径。体检会报告低于文档水位的项目清单。[升级与体检回归](crates/xgc-cli/tests/upgrade_project.rs)
 
-编辑器打开项目或直接打开已登记场景时，新建和实例化先在项目锁内落盘预留 ID，再修改草稿。Revert 保留已有成员 ID，只为新成员领号。撤销、失败和丢弃草稿允许留空号，后续会话从项目水位继续。独立世界的 Agent 与 CLI 快照写入仍是文件操作，项目作者事务接入同一水位的工作仍开放。[并发和耗尽回归](crates/xgc-store/tests/project_session.rs) · [编辑入口回归](crates/xgc-editor/tests/project_ids.rs)
+编辑器打开项目或直接打开已登记场景时，新建和实例化先在项目锁内落盘预留 ID，再修改草稿。Revert 保留已有成员 ID，只为新成员领号。撤销、失败和丢弃草稿允许留空号，后续会话从项目水位继续。[并发和耗尽回归](crates/xgc-store/tests/project_session.rs) · [编辑入口回归](crates/xgc-editor/tests/project_ids.rs)
+
+Agent 加载已登记场景时返回十进制字符串 `next_entity_id`。包含 `Spawn` 的事务先完成计划与版本检查，再在同一项目锁下认领显式 ID 范围。会话争用同一 ID 时，后提交的会话得到当前水位。重试成功过的幂等请求返回原回执，撤销和回放均沿用已发出的 ID。编辑器和 Agent 保存已登记场景前都比较加载或上次保存时的磁盘原文。过期草稿继续留在会话内，删除、改指或取消登记会使保存失败。CLI 的独立快照命令可输出到独立文件，拒绝覆盖已登记场景。[Agent 作者回归](crates/xgc-agent/tests/project_authoring.rs) · [CLI 快照回归](crates/xgc-cli/tests/upgrade_project.rs)
+
+写入门禁通过 17 项聚焦回归、工作区全目标检查、5 个包严格 Clippy 及共 258 项测试，另有 4 项忽略。重新迁出的 XGame 项目体检为 0 问题，schema、showcase 151 个串行和四线程检查点、角色场景 120 步完整快照均与基准一致。
 
 在实际 XGame 项目上，原生 v1 升级和从旧项目重新迁移都通过体检。除清单和锁文件外，43 个文件逐字节一致，5 份场景或预制体文档共有 38 个不重复的实体 ID，项目水位均为 39。工作区全目标检查、6 个包严格 Clippy、298 项测试、xtask、schema 重复导出、showcase 黄金轨迹与截图及角色场景四入口对表均通过，另有 2 项测试忽略。
 

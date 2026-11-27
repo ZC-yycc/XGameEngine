@@ -36,6 +36,7 @@ impl Agent {
         self.base = world.snapshot();
         self.world = world;
         self.query_epoch = QueryEpoch::new();
+        self.project_scene = None;
         self.plans.clear();
         self.applied.clear();
         self.apply_receipts.clear();
