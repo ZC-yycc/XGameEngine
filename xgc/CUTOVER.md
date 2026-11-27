@@ -31,6 +31,10 @@
 
 在 `xgc/` 运行 `cargo test --locked --offline --release -p xgc-world -p xgc-sim -p xgc-xtask --test m0_bench -- --ignored --nocapture --test-threads=1`。基础循环用 `cargo test --locked --offline --release -p xgc-sim --test steady_state -- foundation_world_loop_has_no_allocations --exact --nocapture --test-threads=1`。计时先用 `--no-run` 完成构建，再在独占窗口串行跑测试产物。
 
+同机按 AB/BA 单线程交替跑冻结的 `21c70f8` 与层级优化。五对进程各预热两次、采样九次，每次移动根并核对全部十万个实体。五批中位数从 62.7662 ms 降至 3.6839 ms，快 17.04 倍。优化后 45 个原始样本为 3.0746–5.8477 ms，仍超过 2 ms。预热后的收集、传播、排序及写回各段均为 0 次 / 0 B。首次分配请求从 48 次 / 31,981,592 B 增至 52 次 / 36,193,680 B，含重分配。分段中位耗时以收集 1.2223 ms、传播 1.6414 ms 为主，写回由 46.7344 ms 降至 0.9803 ms。
+
+传播复用未改变的父子拓扑，继续用原变换合成，并按持久 ID 类型化写回以保持逐字段修订号。Release 回归覆盖重排、缺父、环与环的子树、句柄复用和非有限浮点位模式。21 项回放和 8 项稳态用例通过，另有 1 项基准忽略。showcase 轨迹及角色场景快照复验一致。[传播实现](crates/xgc-sim/src/hierarchy.rs) · [类型化写回](crates/xgc-world/src/query/hierarchy.rs) · [回放回归](crates/xgc-sim/tests/replay/hierarchy.rs)
+
 ## S2 物理场基线
 
 用 i7-10700、32 GiB RAM、Windows 10、Rust 1.98.1 MSVC 测量 Release ThinLTO 的默认单线程固定步。每档预热 18 步。组场与首步另计，状态哈希在计时外计算。[基准代码](crates/xgc-sim/tests/physics_yard.rs)

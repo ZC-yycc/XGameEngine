@@ -3,6 +3,8 @@ use xgc_reflect::{Component, ComponentId};
 
 use super::{Archetype, World};
 
+mod hierarchy;
+
 pub(crate) fn apply2_mut_arch<A: Component, B: Component>(
     arch: &mut Archetype,
     f: &mut impl FnMut(EntityKey, &mut A, &mut B),

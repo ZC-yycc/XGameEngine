@@ -1,13 +1,14 @@
-use std::collections::{HashMap, HashSet};
-
-use xgc_base::{EntityId, EntityKey};
+use xgc_base::EntityKey;
 use xgc_world::{
-    Animator, CharacterController, Component, GlobalTransform, Parent, PhysicsBody, Transform,
-    Value, Velocity, World,
+    Animator, CharacterController, Component, PhysicsBody, Transform, Velocity, World,
 };
 
 use super::{System, SystemAccess};
 use crate::animation_events::crossed_events;
+
+#[path = "hierarchy.rs"]
+mod hierarchy;
+pub use hierarchy::HierarchySystem;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PhysicsSystem {
@@ -335,125 +336,5 @@ impl System for GravitySystem {
                 velocity.linear[axis] += *value * dt;
             }
         });
-    }
-}
-
-/// 层级系统：按 `Parent` 链把局部 `Transform` 合成 `GlobalTransform`。
-///
-/// 没有 `Parent`、或父节点不带 `GlobalTransform` 的实体按根处理；环里的实体
-/// 保持原值，不阻塞其它节点。节点 / 存在集 / 结果表跨帧复用，稳态不再分配。
-#[derive(Default)]
-pub struct HierarchySystem {
-    nodes: Vec<HierarchyNode>,
-    present: HashSet<EntityId>,
-    globals: HashMap<EntityId, GlobalTransform>,
-}
-
-struct HierarchyNode {
-    entity: EntityId,
-    parent: Option<EntityId>,
-    local: Transform,
-}
-
-impl System for HierarchySystem {
-    fn name(&self) -> &'static str {
-        "hierarchy"
-    }
-
-    fn access(&self) -> SystemAccess {
-        SystemAccess {
-            reads: vec![Parent::ID, Transform::ID],
-            writes: vec![GlobalTransform::ID],
-        }
-    }
-
-    fn run(&mut self, world: &mut World, _dt: f32) {
-        self.nodes.clear();
-        self.present.clear();
-        self.globals.clear();
-
-        world.for_each::<GlobalTransform>(|key, _| {
-            let Some(entity) = world.entity(key) else {
-                return;
-            };
-            self.nodes.push(HierarchyNode {
-                entity,
-                parent: world.get::<Parent>(key).map(|parent| parent.entity),
-                local: world.get::<Transform>(key).copied().unwrap_or_default(),
-            });
-        });
-
-        for node in &self.nodes {
-            self.present.insert(node.entity);
-        }
-        for node in &self.nodes {
-            if node
-                .parent
-                .is_none_or(|parent| !self.present.contains(&parent))
-            {
-                self.globals
-                    .insert(node.entity, GlobalTransform::from_local(&node.local));
-            }
-        }
-
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for node in &self.nodes {
-                if self.globals.contains_key(&node.entity) {
-                    continue;
-                }
-                let Some(parent) = node.parent else {
-                    continue;
-                };
-                let Some(parent_global) = self.globals.get(&parent) else {
-                    continue;
-                };
-                self.globals.insert(
-                    node.entity,
-                    GlobalTransform::compose(parent_global, &node.local),
-                );
-                changed = true;
-            }
-        }
-
-        // 每次写入都会推进修订号，按持久 ID 写回才能让完整快照可重放。
-        self.nodes.sort_unstable_by_key(|node| node.entity);
-        for node in &self.nodes {
-            let Some(global) = self.globals.get(&node.entity) else {
-                continue;
-            };
-            let _ = world.set_field(
-                node.entity,
-                GlobalTransform::ID,
-                "position",
-                &Value::Vec3([
-                    f64::from(global.position[0]),
-                    f64::from(global.position[1]),
-                    f64::from(global.position[2]),
-                ]),
-            );
-            let _ = world.set_field(
-                node.entity,
-                GlobalTransform::ID,
-                "rotation",
-                &Value::Quat([
-                    f64::from(global.rotation[0]),
-                    f64::from(global.rotation[1]),
-                    f64::from(global.rotation[2]),
-                    f64::from(global.rotation[3]),
-                ]),
-            );
-            let _ = world.set_field(
-                node.entity,
-                GlobalTransform::ID,
-                "scale",
-                &Value::Vec3([
-                    f64::from(global.scale[0]),
-                    f64::from(global.scale[1]),
-                    f64::from(global.scale[2]),
-                ]),
-            );
-        }
     }
 }

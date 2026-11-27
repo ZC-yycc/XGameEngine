@@ -11,6 +11,9 @@ use xgc_world::{
     PhysicsBody, Transform, Value, Velocity, World,
 };
 
+#[path = "replay/hierarchy.rs"]
+mod hierarchy;
+
 fn build_scenario() -> Scenario {
     let mut world = World::new();
     for i in 0..3 {
@@ -299,33 +302,6 @@ fn hierarchy_writeback_uses_durable_entity_order() {
         assert_eq!(entity.revision, revision_before + 3 * (index as u64 + 1));
     }
     assert_eq!(updated, restored.world_data());
-}
-
-#[test]
-fn hierarchy_system_leaves_cycles_alone() {
-    let mut world = World::new();
-    let first_key = world.spawn((
-        Transform::default(),
-        Parent::default(),
-        GlobalTransform::default(),
-    ));
-    let second_key = world.spawn((
-        Transform::default(),
-        Parent::default(),
-        GlobalTransform::default(),
-    ));
-    let first = world.entity(first_key).unwrap();
-    let second = world.entity(second_key).unwrap();
-    let _ = world.set_field(first, Parent::ID, "entity", &Value::Entity(second.raw()));
-    let _ = world.set_field(second, Parent::ID, "entity", &Value::Entity(first.raw()));
-
-    let mut simulation = Simulation::with_fixed_dt(world, 1.0 / 60.0);
-    simulation.step(Vec::new()).unwrap();
-    let world = simulation.into_world();
-    assert_eq!(
-        world.get_field(first, GlobalTransform::ID, "position"),
-        Some(Value::Vec3([0.0; 3]))
-    );
 }
 
 #[test]
