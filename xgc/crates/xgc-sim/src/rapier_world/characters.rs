@@ -6,6 +6,7 @@
 
 use rapier3d::control::KinematicCharacterController;
 use rapier3d::na::{Isometry3, Translation3, Vector3};
+use rapier3d::prelude::{ColliderHandle, QueryFilter, QueryFilterFlags};
 
 use xgc_base::{EntityId, EntityKey};
 use xgc_world::{CharacterController, Transform, Velocity, World};
@@ -22,6 +23,7 @@ use crate::character_kcc;
 pub(super) struct CharacterLink {
     pub(super) key: EntityKey,
     pub(super) body: rapier3d::prelude::RigidBodyHandle,
+    pub(super) collider: ColliderHandle,
     pub(super) center_height: f32,
     pub(super) rest_gap: f32,
     pub(super) capsule: rapier3d::prelude::Capsule,
@@ -92,7 +94,7 @@ impl RapierWorld {
                     .position(position)
                     .build(),
             );
-            self.colliders.insert_with_parent(
+            let collider = self.colliders.insert_with_parent(
                 rapier3d::prelude::ColliderBuilder::capsule_y(
                     character_kcc::half_height(def),
                     character_kcc::radius(def),
@@ -104,6 +106,7 @@ impl RapierWorld {
             self.characters.push(CharacterLink {
                 key: *key,
                 body,
+                collider,
                 center_height,
                 rest_gap,
                 capsule: character_kcc::character_capsule(def),
@@ -171,6 +174,14 @@ impl RapierWorld {
             let step_offset = def.sanitized().step_offset;
             let radius = character_kcc::radius(&def);
             let limit_cos = character_kcc::slope_limit(&def).to_radians().cos();
+            let filter = QueryFilter {
+                flags: QueryFilterFlags::EXCLUDE_SENSORS,
+                exclude_rigid_body: Some(link.body),
+                groups: self
+                    .filtered
+                    .then(|| self.colliders[link.collider].collision_groups()),
+                ..Default::default()
+            };
 
             // ① 脚下探测：起始就站着才允许累加重力之外的竖直逻辑。
             let before = character_kcc::probe_ground(
@@ -180,7 +191,7 @@ impl RapierWorld {
                 &link.capsule,
                 core,
                 &start,
-                link.body,
+                filter,
                 snap + prediction,
             );
             let grounded_at_start = before.as_ref().is_some_and(|hit| {
@@ -231,7 +242,7 @@ impl RapierWorld {
                 &link.capsule,
                 &start,
                 desired,
-                link.body,
+                filter,
                 dt,
                 &mut self.wall_normals,
             );
@@ -299,7 +310,7 @@ impl RapierWorld {
                     step_offset + rest,
                     radius,
                     rest,
-                    link.body,
+                    filter,
                     dt,
                 ) {
                     let climbed = Vector3::new(
@@ -317,7 +328,7 @@ impl RapierWorld {
                         &link.capsule,
                         core,
                         &stepped,
-                        link.body,
+                        filter,
                         prediction,
                     );
                     let walkable = land.as_ref().is_none_or(|hit| hit.normal.y >= limit_cos);
@@ -336,7 +347,7 @@ impl RapierWorld {
                     &link.capsule,
                     core,
                     &next,
-                    link.body,
+                    filter,
                     snap + skin,
                 ) {
                     if hit.gap > rest + 1e-4 && hit.gap <= snap {
@@ -359,7 +370,7 @@ impl RapierWorld {
                 &link.capsule,
                 core,
                 &next,
-                link.body,
+                filter,
                 prediction,
             );
             let grounded = after.as_ref().is_some_and(|hit| {
@@ -390,7 +401,11 @@ impl RapierWorld {
                 slot.grounded = grounded;
             }
             if let Some(entity) = world.entity(link.key) {
-                self.collect_sensor_contacts(world, link, &next, entity, &mut contacts);
+                let sensors = QueryFilter {
+                    flags: QueryFilterFlags::empty(),
+                    ..filter
+                };
+                self.collect_sensor_contacts(world, link, &next, entity, sensors, &mut contacts);
             }
         }
         contacts.sort_unstable();
@@ -411,6 +426,7 @@ impl RapierWorld {
         link: &CharacterLink,
         position: &Isometry3<f32>,
         entity: EntityId,
+        filter: QueryFilter<'_>,
         out: &mut Vec<(u64, u64)>,
     ) {
         for sensor in &self.links {
@@ -426,7 +442,7 @@ impl RapierWorld {
                 &self.colliders,
                 position,
                 &link.capsule,
-                rapier3d::prelude::QueryFilter::default().exclude_rigid_body(link.body),
+                filter,
                 |handle| {
                     if handle == sensor.collider {
                         hit = true;

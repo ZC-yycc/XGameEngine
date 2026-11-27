@@ -127,6 +127,8 @@ pub(crate) struct OldProject {
     #[serde(default)]
     pub(crate) quality: xgc_base::render_settings::RenderQuality,
     #[serde(default)]
+    pub(crate) layers: xgc_base::layer::CollisionLayers,
+    #[serde(default)]
     pub(crate) format_version: u32,
     #[serde(default)]
     pub(crate) name: String,

@@ -46,6 +46,7 @@ impl Project {
                 input: None,
                 render: Default::default(),
                 quality: Default::default(),
+                layers: Default::default(),
             },
         )
         .unwrap();

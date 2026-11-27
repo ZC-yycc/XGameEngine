@@ -33,6 +33,27 @@ struct LoadedScene {
     source: SceneSource,
 }
 
+impl LoadedScene {
+    fn runner(&self) -> Result<(ScriptedRunner, xgc_render::MeshCache), String> {
+        let mut world = World::new();
+        world
+            .restore_world_data(&self.data)
+            .map_err(|err| format!("恢复世界失败：{err}"))?;
+        match &self.source {
+            SceneSource::Project(project) => world.set_collision_layers(&project.manifest().layers),
+            SceneSource::Cooked {
+                runtime: Some(runtime),
+                ..
+            } => world.set_collision_layers(&runtime.layers),
+            SceneSource::Cooked { runtime: None, .. } => {}
+        }
+        Ok(ScriptedRunner::with_assets(
+            world,
+            self.source.asset_paths(),
+        ))
+    }
+}
+
 enum SceneSource {
     Project(Box<ProjectSession>),
     Cooked {
@@ -149,11 +170,7 @@ pub fn run_cooked_scene(
     scene: Option<&str>,
 ) -> Result<PlayerStats, String> {
     let loaded = load_scene(path, scene)?;
-    let mut world = World::new();
-    world
-        .restore_world_data(&loaded.data)
-        .map_err(|err| format!("恢复世界失败：{err}"))?;
-    let (mut runner, _) = ScriptedRunner::with_assets(world, loaded.source.asset_paths());
+    let (mut runner, _) = loaded.runner()?;
     for _ in 0..frames {
         runner.step()?;
     }

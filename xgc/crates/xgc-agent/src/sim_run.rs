@@ -149,16 +149,23 @@ impl Preview {
         world
             .restore_world_data(initial)
             .map_err(|err| format!("无法创建预览世界：{err}"))?;
+        let project = project
+            .map(|path| {
+                ProjectSession::open(path)
+                    .map_err(|err| format!("project {} 打不开：{err}", path.display()))
+            })
+            .transpose()?;
+        if let Some(project) = &project {
+            world.set_collision_layers(&project.manifest().layers);
+        }
         let simulation = match dt {
             Some(dt) => Simulation::with_fixed_dt(world, dt),
             None => Simulation::new(world),
         };
-        let Some(path) = project else {
+        let Some(project) = project else {
             // 无项目时连脚本宿主也不创建，场景中的相对引用不会读到工作目录。
             return Ok(Self::Systems(Box::new(simulation)));
         };
-        let project = ProjectSession::open(path)
-            .map_err(|err| format!("project {} 打不开：{err}", path.display()))?;
         let assets = asset_paths(Some(project.root()), &project.manifest().search_paths);
         let (runner, _) = ScriptedRunner::with_simulation(simulation, assets);
         Ok(Self::Project(Box::new(runner)))

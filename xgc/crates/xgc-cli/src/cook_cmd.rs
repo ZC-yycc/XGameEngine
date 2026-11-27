@@ -6,11 +6,10 @@ use std::process::ExitCode;
 
 use xgc_asset::{resolve_read_path, AssetCatalog, CookRuntime, PackTarget, SearchPaths};
 use xgc_base::path::normalize_project_relative;
-use xgc_host::{asset_paths, ScriptedRunner};
 use xgc_store::{load_world, load_world_binary, save_world, save_world_binary};
 use xgc_world::{builtin_registry, World, WorldData};
 
-use crate::runtime_cmd::load_native_runtime;
+use crate::runtime_cmd::{load_native_runtime, runner_with_runtime};
 
 fn cook_runtime(root: &Path) -> Result<CookRuntime, String> {
     Ok(load_native_runtime(root)?.unwrap_or_else(|| CookRuntime::standalone(root)))
@@ -133,8 +132,8 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
         return ExitCode::from(2);
     };
     let dir = Path::new(dir);
-    let search_paths = match xgc_asset::verify_manifest(dir) {
-        Ok(manifest) => manifest.map_or_else(Vec::new, |manifest| manifest.runtime.search_paths),
+    let runtime = match xgc_asset::verify_manifest(dir) {
+        Ok(manifest) => manifest.map_or_else(CookRuntime::default, |manifest| manifest.runtime),
         Err(differences) => {
             for line in &differences {
                 eprintln!("{line}");
@@ -165,7 +164,7 @@ pub fn run_cooked(dir: Option<&str>, frames: Option<&str>) -> ExitCode {
         eprintln!("恢复世界失败：{err}");
         return ExitCode::from(2);
     }
-    let (mut runner, _) = ScriptedRunner::with_assets(world, asset_paths(Some(dir), &search_paths));
+    let mut runner = runner_with_runtime(world, dir, &runtime);
     for _ in 0..frames {
         if let Err(err) = runner.step() {
             eprintln!("{err}");

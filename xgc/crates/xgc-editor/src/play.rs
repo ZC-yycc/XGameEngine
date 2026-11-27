@@ -52,6 +52,9 @@ impl EditorState {
         world
             .restore_world_data(&self.world.world_data())
             .map_err(|err| format!("进入 Play 失败：{err}"))?;
+        if let Some(project) = &self.project {
+            world.set_collision_layers(&project.manifest().layers);
+        }
         let (runner, _) = ScriptedRunner::with_assets(world, self.asset_paths());
         self.play = Some(PlaySession {
             selected: self.selected,

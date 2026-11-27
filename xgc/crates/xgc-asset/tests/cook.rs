@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use xgc_asset::cook_project;
+use serde_json::{json, Value};
+use xgc_asset::{cook_project, cook_project_with_runtime, verify_manifest};
 
 #[test]
 fn cooks_referenced_sources_and_stale_files() {
@@ -139,5 +140,61 @@ fn cooks_only_referenced_assets_and_sidecars() {
     ] {
         assert!(!out.join(unused).exists(), "不应烹饪 {unused}");
     }
+    std::fs::remove_dir_all(fixture).unwrap();
+}
+
+#[test]
+fn cooked_signature_covers_the_collision_layers() {
+    let fixture = std::env::temp_dir().join(format!("xgc_cook_layers_{}", std::process::id()));
+    let root = fixture.join("source");
+    let out = fixture.join("cooked");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.lua"), b"return 1").unwrap();
+    let path = out.join("cook.json");
+    let baseline = cook_project(&root, &out).unwrap();
+    let baseline_json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(baseline_json["runtime"].get("layers").is_none());
+
+    let runtime = json!({
+        "search_paths": [],
+        "input": null,
+        "layers": {
+            "names": {"3": "Pickup", "31": "Ghost"},
+            "masks": {"3": 2147483648u32, "31": 0},
+        }
+    });
+    let manifest = cook_project_with_runtime(
+        &root,
+        &out,
+        serde_json::from_value(runtime.clone()).unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(manifest.files, baseline.files);
+    assert_ne!(manifest.signature, baseline.signature);
+    assert_eq!(verify_manifest(&out).unwrap().as_ref(), Some(&manifest));
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(document["runtime"]["layers"], runtime["layers"]);
+
+    // 只改掩码且沿用原签名，读回时必须识别出配置变更。
+    document["runtime"]["layers"]["masks"]["31"] = json!(1);
+    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    assert_eq!(verify_manifest(&out).unwrap_err(), ["manifest 签名不匹配"]);
+
+    let mut invalid = runtime;
+    invalid["layers"]["masks"]["32"] = json!(0);
+    let rejected = fixture.join("rejected");
+    let message = cook_project_with_runtime(
+        &root,
+        &rejected,
+        serde_json::from_value(invalid).unwrap(),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        message.contains("layers") && message.contains("32"),
+        "{message}"
+    );
+    assert!(!rejected.exists());
     std::fs::remove_dir_all(fixture).unwrap();
 }

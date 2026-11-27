@@ -193,6 +193,7 @@ fn selects_a_named_scene_from_the_project_manifest() {
             input: None,
             render: Default::default(),
             quality: Default::default(),
+            layers: Default::default(),
         },
     )
     .unwrap();

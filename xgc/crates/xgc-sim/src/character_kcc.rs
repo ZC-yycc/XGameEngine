@@ -162,14 +162,9 @@ pub(crate) fn probe_ground(
     capsule: &Capsule,
     center_height: f32,
     position: &Isometry3<f32>,
-    own_body: RigidBodyHandle,
+    filter: QueryFilter<'_>,
     extra: f32,
 ) -> Option<GroundHit> {
-    let filter = QueryFilter {
-        flags: QueryFilterFlags::EXCLUDE_SENSORS,
-        exclude_rigid_body: Some(own_body),
-        ..Default::default()
-    };
     let origin = Point3::from(position.translation.vector);
     let ray = Ray::new(origin, Vector3::new(0.0, -1.0, 0.0));
     // 与旧端同式：射线要够长，能探到"再往下 `extra` 还有没有面"。
@@ -210,8 +205,7 @@ pub(crate) struct CharacterMovement {
 
 /// 调 `move_shape` 做一次 collide-and-slide（水平 + 竖直都由调用方放进 `desired`）。
 ///
-/// 过滤器与旧端同义：跳过传感器、跳过角色自己的刚体；XGC 还没有碰撞分组，
-/// 等分层落地后这里必须补上"自身层组"（旧端 `QueryFilter.groups`）。
+/// 与探地和台阶试探共用角色的层过滤条件。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn move_character(
     bodies: &RigidBodySet,
@@ -221,15 +215,10 @@ pub(crate) fn move_character(
     capsule: &Capsule,
     position: &Isometry3<f32>,
     desired: Vector3<f32>,
-    own_body: RigidBodyHandle,
+    filter: QueryFilter<'_>,
     dt: f32,
     wall_normals: &mut Vec<Vector3<f32>>,
 ) -> CharacterMovement {
-    let filter = QueryFilter {
-        flags: QueryFilterFlags::EXCLUDE_SENSORS,
-        exclude_rigid_body: Some(own_body),
-        ..Default::default()
-    };
     let movement = controller.move_shape(
         dt,
         bodies,
@@ -264,14 +253,9 @@ pub(crate) fn try_step_up(
     step_height: f32,
     radius: f32,
     rest_gap: f32,
-    own_body: RigidBodyHandle,
+    filter: QueryFilter<'_>,
     dt: f32,
 ) -> Option<Isometry3<f32>> {
-    let filter = QueryFilter {
-        flags: QueryFilterFlags::EXCLUDE_SENSORS,
-        exclude_rigid_body: Some(own_body),
-        ..Default::default()
-    };
     let advance = direction * (horizontal + radius + STEP_PROBE_MARGIN);
     let lift = controller
         .move_shape(

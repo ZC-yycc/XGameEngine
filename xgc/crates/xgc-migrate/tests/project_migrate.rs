@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use xgc_migrate::{migrate_old_project, ProjectMigrationError};
 use xgc_store::{load_project, load_world};
 
+#[path = "project_migrate/layers.rs"]
+mod layers;
 #[path = "project_migrate/render.rs"]
 mod render;
 #[path = "project_migrate/scripts.rs"]
@@ -165,7 +167,6 @@ fn reports_project_components_references_and_unmapped_fields() {
         "asset_references=4",
         "entity_references=2",
         "[migration.morph] Scenes/a.ron 实体 1",
-        "[migration.layer] Scenes/a.ron 实体 2",
         "[plugin.unsupported] Prefabs/P.prefab.ron 实体 7",
         "Spinner",
     ] {

@@ -1,4 +1,4 @@
-//! 项目入口的 Play 回归：GUID、清单输入与失败后的编辑态。
+//! 项目入口的 Play 回归：GUID、清单输入、碰撞矩阵与失败后的编辑态。
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -75,6 +75,7 @@ end
         input: Some("./Config\\controls.ron".into()),
         render: Default::default(),
         quality: Default::default(),
+        layers: Default::default(),
     };
     save_project(&manifest_path, &manifest).unwrap();
 
@@ -169,5 +170,64 @@ end
             .value,
         "hero"
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn project_play_respects_collision_masks_in_the_play_copy() {
+    use xgc_base::layer::LayerIndex;
+    use xgc_world::{CollisionLayer, PhysicsBody, Velocity};
+
+    let dir = std::env::temp_dir().join(format!("xgc-editor-play-layers-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("scenes")).unwrap();
+    std::fs::write(
+        dir.join("project.xgc"),
+        r#"(format_version: 1, name: "Groups", entry_scene: "scenes/main.json",
+            scenes: ["scenes/main.json"], content: (models: "Resources", textures: "Resources",
+                audio: "Resources", prefabs: "Prefabs", scripts: "Scripts"),
+            layers: (masks: {31: 0}))"#,
+    )
+    .unwrap();
+    let scene = dir.join("scenes/main.json");
+    let mut world = World::new();
+    world.spawn((
+        Transform {
+            position: [0.0, 2.0, 0.0],
+            ..Transform::default()
+        },
+        PhysicsBody {
+            kind: "static".into(),
+            shape: "cuboid".into(),
+            half_extents: [3.0, 0.5, 3.0],
+            ..PhysicsBody::default()
+        },
+        CollisionLayer {
+            index: LayerIndex::new(31).unwrap(),
+        },
+    ));
+    let dropping = world.spawn((
+        Transform {
+            position: [0.0, 3.05, 0.0],
+            ..Transform::default()
+        },
+        Velocity::default(),
+        PhysicsBody {
+            shape: "ball".into(),
+            ..PhysicsBody::default()
+        },
+    ));
+    let id = world.entity(dropping).unwrap();
+    save_world(&scene, &world.world_data()).unwrap();
+    let original = std::fs::read(&scene).unwrap();
+    let mut editor = EditorState::open(&dir).unwrap();
+    editor.play().unwrap();
+    editor.pause();
+    for _ in 0..60 {
+        assert!(editor.step().unwrap().is_some());
+    }
+    assert!(editor.entity_position(id).unwrap()[1] < 0.0);
+    editor.stop();
+    assert_eq!(editor.entity_position(id), Some([0.0, 3.05, 0.0]));
+    assert_eq!(std::fs::read(&scene).unwrap(), original);
     std::fs::remove_dir_all(&dir).unwrap();
 }

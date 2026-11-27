@@ -91,12 +91,6 @@ fn unmatched_fields(source: &str, scene: &OldScene) -> Vec<String> {
     let mut notes = Vec::new();
     for entity in &scene.entities {
         let id = entity.id.0;
-        if entity.layer != 0 {
-            notes.push(format!(
-                "[migration.layer] {source} 实体 {id} 的 layer={} 已迁移，项目碰撞过滤待接通",
-                entity.layer
-            ));
-        }
         if source.ends_with(".prefab.ron") && entity.prefab.is_some() {
             notes.push(format!(
                 "[migration.nested_prefab] {source} 实体 {id} 保留展开内容，来源链接需要重建"

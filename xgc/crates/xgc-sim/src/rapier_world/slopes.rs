@@ -14,7 +14,9 @@
 //! 否则两份几何叠在一起，扫掠会有双重接触点。
 
 use rapier3d::na::{Isometry3, Point3, Translation3, UnitQuaternion, Vector3};
-use rapier3d::prelude::{ColliderBuilder, QueryFilter, Ray, RigidBodyBuilder, RigidBodyHandle};
+use rapier3d::prelude::{
+    ColliderBuilder, ColliderHandle, QueryFilter, Ray, RigidBodyBuilder, RigidBodyHandle,
+};
 
 use xgc_base::EntityKey;
 use xgc_world::{PhysicsBody, Slope, World};
@@ -32,7 +34,9 @@ const GROUND_RAY_MAX_TOI: f32 = 1_000.0;
 
 /// 一个坡面实体的运行时托管：静态刚体（碰撞体挂在它上面，删刚体时连带删掉）。
 pub(super) struct SlopeLink {
+    pub(super) key: EntityKey,
     pub(super) body: RigidBodyHandle,
+    pub(super) collider: ColliderHandle,
 }
 
 /// 坡面签名的一项：实体 ID + 句柄（含代际）+ 建几何用到的全部浮点位模式。
@@ -93,9 +97,9 @@ impl RapierWorld {
                 true,
             );
         }
-        for (_, _, def) in &entries {
+        for (_, key, def) in &entries {
             let body = self.bodies.insert(RigidBodyBuilder::fixed().build());
-            self.colliders.insert_with_parent(
+            let collider = self.colliders.insert_with_parent(
                 // 摩擦取大值：坡面是地面，站在上面不该被微小水平力推走；
                 // 反弹为 0，与旧端地形碰撞体的默认口径一致。
                 ColliderBuilder::cuboid(half_length(def), SLOPE_THICKNESS * 0.5, def.size[1] * 0.5)
@@ -109,7 +113,11 @@ impl RapierWorld {
             if let Some(rigid_body) = self.bodies.get_mut(body) {
                 rigid_body.set_position(slope_isometry(def), false);
             }
-            self.slopes.push(SlopeLink { body });
+            self.slopes.push(SlopeLink {
+                key: *key,
+                body,
+                collider,
+            });
         }
         // 新签名接管旧的探针缓冲（重建这条路也不另外分配）。
         self.slope_probe = self.slope_signature.replace(signature).unwrap_or_default();

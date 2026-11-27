@@ -110,9 +110,17 @@ HUD 图片按项目相对路径或 GUID 从同一资产目录读取。GPU 回归
 
 ## 碰撞层实体字段
 
-旧场景和预制体的非零层号迁到 `core.layer:index`。层 0 保持省略，越界层号在旧项目检查和迁移时报告。Agent、Inspector 和数据恢复共用组件派生的 0–31 整数 schema。迁移回归验证层 31 可恢复、−1 和 32 的写操作被拒绝且不改变 revision。项目碰撞矩阵仍待接进求解器。
+旧场景和预制体的非零层号迁到 `core.layer:index`。层 0 保持省略，越界层号在旧项目检查和迁移时报告。Agent、Inspector 和数据恢复共用组件派生的 0–31 整数 schema。迁移回归验证层 31 可恢复、−1 和 32 的写操作被拒绝且不改变 revision。
 
 工作区全目标检查与受影响包严格 Clippy 通过，227 项测试通过，另有 3 项忽略。两次 schema 导出逐字节相同，为 31 个组件、80,700 字节，仅新增 `core.layer`。原生 XGame 项目检查为 0 问题，showcase 的串行、四线程和参考轨迹一致，角色场景第 120 步快照逐字节一致。[迁移回归](crates/xgc-migrate/tests/migrate.rs) · [注册表回归](crates/xgc-world/tests/schema.rs)
+
+## 项目碰撞矩阵
+
+旧项目的层名和掩码覆盖迁到 `project.xgc`，并纳入 cooked 清单签名。缺省全通，显式零掩码拒绝接触。AABB、Rapier 刚体和角色地面、移动及触发查询采用双向过滤。运行时改层只更新已建碰撞体的分组，保留句柄、速度和求解状态。[清单回归](crates/xgc-migrate/tests/project_migrate/layers.rs) · [物理回归](crates/xgc-sim/tests/collision_layers.rs)
+
+在同一双实体场景中，默认掩码让球在第 60 步停在平台上约 3 m。只将平台所在的第 31 层掩码改为零后，球落到 0 m 以下。原生 CLI、cooked CLI 和 Agent 项目预览的终态哈希在两种设置下分别一致。只改 cooked 清单掩码会触发签名拒绝。编辑器 Play 单步得到同样的穿过行为，Stop 后原场景和文件字节保持一致。角色回归另核对了阻挡层同时排除地面和触发器。[跨入口回归](crates/xgc-cli/tests/collision_layers.rs) · [Play 回归](crates/xgc-editor/tests/project_play.rs)
+
+同机 Release 中，缺省掩码的混合场景与八层运动学父链预热后各测 60 步，前后仍分别为 438 次 / 45,424 B 和 180 次 / 5,760 B。两次 schema 导出与矩阵接入前逐字节相同。原生 XGame 项目检查为 0 问题，showcase 的 151 个检查点在串行、四线程和参考轨迹中一致，RTX 2060 / Vulkan / 610.88 的四张严格黄金图通过，角色场景四个入口第 120 步仍为 6 个实体与 `c123b7e8fd701709`。与层级优化合并验证时，工作区全目标检查、严格 Clippy、xtask 及 12 个包的 609 项测试通过，另有 10 项忽略。[分配回归](crates/xgc-sim/tests/steady_state.rs)
 
 ## 项目画面设置
 

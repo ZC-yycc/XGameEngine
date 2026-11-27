@@ -1,7 +1,7 @@
 //! 项目清单 `project.xgc`：迁移产物与三个宿主的共同入口。
 //!
-//! 这里只放**项目级**信息：入口场景、关卡顺序、内容目录、输入映射和画面设置。单个场景
-//! 仍是 `scenes/*.json` 的 `WorldData`，两者各自版本化；清单不重复场景内容。
+//! 这里只放**项目级**信息：入口场景、关卡顺序、内容目录、输入映射、画面设置和碰撞矩阵。
+//! 单个场景仍是 `scenes/*.json` 的 `WorldData`，两者各自版本化；清单不重复场景内容。
 //!
 //! 路径一律是项目相对路径（正斜杠），读写边界都走
 //! `xgc_base::path::normalize_project_relative`，不在这里另写一套。
@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use xgc_base::layer::CollisionLayers;
 use xgc_base::path::normalize_project_relative;
 use xgc_base::render_settings::{RenderQuality, RenderSettings};
 
@@ -35,6 +36,8 @@ pub struct ProjectManifest {
     pub render: RenderSettings,
     #[serde(default, skip_serializing_if = "RenderQuality::is_default")]
     pub quality: RenderQuality,
+    #[serde(default, skip_serializing_if = "CollisionLayers::is_default")]
+    pub layers: CollisionLayers,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +99,9 @@ impl ProjectManifest {
         if let Some(input) = &self.input {
             self.normalized("input", input)?;
         }
+        self.layers
+            .validate()
+            .map_err(|err| StoreError::Format(format!("project.xgc 的 layers 不合法：{err}")))?;
         Ok(())
     }
 

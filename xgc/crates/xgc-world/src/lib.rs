@@ -2,7 +2,7 @@
 #![deny(unsafe_code)]
 use std::any::Any;
 use std::collections::HashMap;
-use xgc_base::{EntityId, EntityKey};
+use xgc_base::{layer::CollisionMasks, EntityId, EntityKey};
 mod animation_components;
 mod animation_events;
 mod character_components;
@@ -305,6 +305,8 @@ pub struct World {
     revision: u64,
     /// 场景级环境（光 / 环境光）：不是实体，跟着世界一起存取。
     environment: SceneEnvironment,
+    /// 项目清单的碰撞掩码，随运行会话配置，快照只记录实体所属层。
+    collision_masks: CollisionMasks,
     /// 本帧碰撞事件（瞬态；不进 `WorldData` / `state_hash` / 快照）。
     collision_events: Vec<CollisionEvent>,
     /// 本步命中的动画事件（瞬态；`step_with` 每步开头清空）。
@@ -332,6 +334,7 @@ impl World {
             next_id: 0,
             revision: 0,
             environment: SceneEnvironment::default(),
+            collision_masks: CollisionMasks::default(),
             collision_events: Vec::new(),
             animation_events: Vec::new(),
             body_velocities: Vec::new(),

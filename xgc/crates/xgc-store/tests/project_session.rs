@@ -37,6 +37,7 @@ fn manifest() -> ProjectManifest {
         input: None,
         render: Default::default(),
         quality: Default::default(),
+        layers: Default::default(),
     }
 }
 
@@ -69,7 +70,55 @@ fn opens_a_directory_and_rejects_unregistered_scenes() {
 fn manifest_roundtrips_through_disk() {
     let dir = temp("roundtrip");
     let manifest = manifest();
-    save_project(&dir.join("project.xgc"), &manifest).unwrap();
-    assert_eq!(load_project(&dir.join("project.xgc")).unwrap(), manifest);
+    let path = dir.join("project.xgc");
+    save_project(&path, &manifest).unwrap();
+    assert_eq!(load_project(&path).unwrap(), manifest);
+    assert!(!std::fs::read_to_string(path).unwrap().contains("layers:"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn manifest_preserves_collision_overrides() {
+    let dir = temp("layer-roundtrip");
+    let path = dir.join("project.xgc");
+    let original = ron::ser::to_string(&manifest()).unwrap();
+    let fields = original.strip_prefix('(').unwrap();
+    let source = format!(
+        r#"(layers:(names:{{3:"Pickup",31:"Ghost"}},masks:{{3:2147483648,31:0}}),{fields}"#
+    );
+    std::fs::write(&path, source).unwrap();
+    let parsed = load_project(&path).unwrap();
+    save_project(&path, &parsed).unwrap();
+    assert_eq!(load_project(&path).unwrap(), parsed);
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap()["layers"],
+        serde_json::json!({
+            "names": {"3": "Pickup", "31": "Ghost"},
+            "masks": {"3": 2147483648u32, "31": 0},
+        })
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn rejects_out_of_range_layers_at_manifest_boundaries() {
+    let dir = temp("bad-layers");
+    let path = dir.join("project.xgc");
+    let original = ron::ser::to_string(&manifest()).unwrap();
+    let fields = original.strip_prefix('(').unwrap();
+    for invalid in [r#"names:{32:"Unknown"}"#, "masks:{32:0}"] {
+        let source = format!("(layers:({invalid}),{fields}");
+        let parsed = ron::from_str(&source).unwrap();
+        std::fs::write(&path, &source).unwrap();
+        let read = load_project(&path).unwrap_err().to_string();
+        let write = save_project(&path, &parsed).unwrap_err().to_string();
+        for message in [read, write] {
+            assert!(
+                message.contains("layers") && message.contains("32"),
+                "{message}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }

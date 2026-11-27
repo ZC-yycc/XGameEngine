@@ -14,7 +14,8 @@ use rapier3d::prelude::*;
 
 use xgc_base::EntityKey;
 use xgc_world::{
-    CharacterController, Component, GlobalTransform, PhysicsBody, Slope, Transform, Velocity, World,
+    CharacterController, CollisionLayer, Component, GlobalTransform, PhysicsBody, Slope, Transform,
+    Velocity, World,
 };
 
 use crate::{System, SystemAccess};
@@ -22,6 +23,7 @@ use crate::{System, SystemAccess};
 mod bodies;
 mod characters;
 mod explain;
+mod groups;
 mod slopes;
 use bodies::{isometry, world_transform, BodyLink, BodySignature};
 use characters::CharacterLink;
@@ -47,6 +49,7 @@ pub struct RapierWorld {
     impulse_joints: ImpulseJointSet,
     multibody_joints: MultibodyJointSet,
     links: Vec<BodyLink>,
+    filtered: bool,
     /// 建体时的输入签名（按 ID 排序）；第一次建表整份重建，之后按 ID 差量修补。
     ///
     /// 必须带 `EntityKey` 而不是只比数量：`Replace` / 组件增删 / 快照恢复只换代不换 ID，
@@ -111,6 +114,7 @@ impl RapierWorld {
             impulse_joints: ImpulseJointSet::new(),
             multibody_joints: MultibodyJointSet::new(),
             links: Vec::new(),
+            filtered: false,
             built_signature: None,
             body_probe: Vec::new(),
             body_transform_chain: Vec::new(),
@@ -136,6 +140,7 @@ impl RapierWorld {
         // 坡面几何要先于角色推进：`sync_character_poses` 与 `move_shape` 都要能看到坡。
         self.ensure_slopes(world);
         self.ensure_characters(world);
+        self.sync_collision_groups(world);
         self.sync_character_poses(world);
         // 运动学体：脚本摆好的位置每步推给物理（与旧端 `push_kinematic_bodies` 同义）。
         for link in &self.links {
@@ -240,6 +245,7 @@ impl System for RapierPhysicsSystem {
         SystemAccess {
             reads: vec![
                 PhysicsBody::ID,
+                CollisionLayer::ID,
                 GlobalTransform::ID,
                 CharacterController::ID,
                 // `step` 会在 `ensure_slopes` 里读坡面组件建静态碰撞体；漏声明会让
@@ -258,7 +264,8 @@ impl System for RapierPhysicsSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xgc_world::World;
+    use xgc_base::layer::{CollisionLayers, LayerIndex};
+    use xgc_world::{CollisionLayer, World};
 
     fn body(kind: &str) -> PhysicsBody {
         PhysicsBody {
@@ -319,6 +326,44 @@ mod tests {
         assert_eq!(physics.ground_under(2.0, 0.0, 4.0), Some(3.5));
         assert!(physics.ground_under(0.0, 0.0, 4.0).is_none());
         assert_eq!(world.get::<Transform>(platform).unwrap().position[0], 0.0);
+    }
+
+    #[test]
+    fn changing_a_body_layer_keeps_its_handle_and_solved_velocity() {
+        let mut world = World::new();
+        world.set_collision_layers(&CollisionLayers {
+            masks: [(31, 0)].into(),
+            ..CollisionLayers::default()
+        });
+        let cube = world.spawn((
+            Transform::default(),
+            Velocity::default(),
+            body("dynamic"),
+            CollisionLayer::default(),
+        ));
+        let mut physics = RapierWorld::new();
+        world.queue_body_velocity(world.entity(cube).unwrap(), [3.0, 0.0, 0.0]);
+        physics.step(&mut world, FIXED_DT);
+        let link = physics.links[0];
+
+        // 过滤变化只改碰撞体分组，在飞的速度和句柄必须延续。
+        world.get_mut::<CollisionLayer>(cube).unwrap().index = LayerIndex::new(31).unwrap();
+        physics.step(&mut world, FIXED_DT);
+        assert_eq!(physics.links[0].body, link.body);
+        assert_eq!(physics.links[0].collider, link.collider);
+        assert_eq!(physics.body_patch_count(), 0);
+        let groups = physics.colliders[link.collider].collision_groups();
+        assert_eq!(groups.memberships.bits(), 1 << 31);
+        assert_eq!(groups.filter.bits(), 0);
+        let velocity = world.get::<Velocity>(cube).unwrap().linear;
+        assert_eq!(velocity[0], 3.0);
+        assert!((velocity[1] - 2.0 * GRAVITY[1] * FIXED_DT).abs() < 1e-5);
+
+        world.set_collision_layers(&CollisionLayers::default());
+        physics.step(&mut world, FIXED_DT);
+        let groups = physics.colliders[link.collider].collision_groups();
+        assert_eq!(groups.memberships.bits(), u32::MAX);
+        assert_eq!(groups.filter.bits(), u32::MAX);
     }
 
     /// 翻滚能力：带初始倾角的动态盒子落地后姿态必须变化（简化 AABB 做不到）。

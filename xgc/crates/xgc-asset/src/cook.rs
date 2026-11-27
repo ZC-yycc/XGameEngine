@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use xgc_base::layer::CollisionLayers;
 use xgc_base::path::normalize_project_relative;
 use xgc_base::render_settings::{RenderQuality, RenderSettings};
 
@@ -44,6 +45,8 @@ pub struct CookRuntime {
     pub render: RenderSettings,
     #[serde(default, skip_serializing_if = "RenderQuality::is_default")]
     pub quality: RenderQuality,
+    #[serde(default, skip_serializing_if = "CollisionLayers::is_default")]
+    pub layers: CollisionLayers,
 }
 
 impl CookRuntime {
@@ -68,6 +71,9 @@ impl CookRuntime {
         }
         self.render = self.render.sanitized();
         self.quality = self.quality.sanitized();
+        self.layers
+            .validate()
+            .map_err(|err| format!("cook.json 的 layers 不合法：{err}"))?;
         Ok(self)
     }
 }
@@ -367,7 +373,7 @@ fn read_manifest(out: &Path) -> Option<CookManifest> {
 }
 
 fn signature(manifest: &CookManifest) -> String {
-    // 搜索根换序会改变读取结果，也必须进入确定性签名。
+    // 搜索根顺序和碰撞矩阵都影响运行结果，因此签名覆盖完整的运行配置。
     let data = serde_json::to_vec(&(manifest.version, &manifest.runtime, &manifest.files))
         .expect("清单只包含可序列化的整数与字符串");
     fnv_hex(&data)

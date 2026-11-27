@@ -10,7 +10,6 @@ use xgc_host::window::{fit_viewport, WindowInput};
 use xgc_host::{FixedStepClock, ScriptedRunner, WindowAudio};
 use xgc_render::{GpuContext, MeshCache, RenderQuality, RenderSettings, Renderer};
 use xgc_sim::{InputMap, DEFAULT_UI_VIEWPORT};
-use xgc_world::World;
 
 use crate::SceneSource;
 
@@ -84,11 +83,7 @@ impl PlayerApp {
                 runtime: None,
             } => InputMap::load(&root.join("input.ron")).ok(),
         };
-        let mut world = World::new();
-        world
-            .restore_world_data(&loaded.data)
-            .map_err(|err| format!("恢复世界失败：{err}"))?;
-        let (runner, meshes) = ScriptedRunner::with_assets(world, loaded.source.asset_paths());
+        let (runner, meshes) = loaded.runner()?;
         self.dir = loaded.source.root().to_path_buf();
         self.render_settings = loaded.source.render_settings();
         self.input_map = input;
@@ -266,7 +261,7 @@ pub fn run_scene(dir: &Path, scene: Option<&str>) -> eframe::Result {
 mod tests {
     use super::*;
     use xgc_store::{save_project, save_world, ProjectContent, ProjectManifest};
-    use xgc_world::{Script, Transform};
+    use xgc_world::{Script, Transform, World};
 
     #[test]
     fn window_uses_only_the_manifest_input_map() {
@@ -314,6 +309,7 @@ mod tests {
                 scripts: "Scripts".into(),
             },
             search_paths: Vec::new(),
+            layers: Default::default(),
             input: Some("./Config\\controls.ron".into()),
             render: RenderSettings {
                 exposure: 2.25,
@@ -367,6 +363,7 @@ mod tests {
                     input: manifest.input.clone(),
                     render: manifest.render,
                     quality: manifest.quality,
+                    layers: manifest.layers.clone(),
                 },
                 None,
             )

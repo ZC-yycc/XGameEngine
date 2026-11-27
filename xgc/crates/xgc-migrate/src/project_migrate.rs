@@ -87,6 +87,9 @@ pub struct ProjectMigrationReport {
     pub asset_references: usize,
     /// 父节点和预制体来源等实体 ID 引用按出现次数计数。
     pub entity_references: usize,
+    /// 项目清单实际保留的层名和碰撞掩码覆盖数。
+    pub layer_names: usize,
+    pub layer_masks: usize,
     /// 需要移植的行为和需要重新配置的字段，使用旧文件与实体 ID 定位。
     pub unmatched: Vec<String>,
     pub dry_run: bool,
@@ -115,6 +118,12 @@ impl ProjectMigrationReport {
             self.output.display(),
             suffix
         );
+        if self.layer_names != 0 || self.layer_masks != 0 {
+            text.push_str(&format!(
+                "\n  [migration.layers] names={} masks={} 项目碰撞矩阵保留在 project.xgc",
+                self.layer_names, self.layer_masks
+            ));
+        }
         for note in &self.unmatched {
             text.push_str("\n  migration: ");
             text.push_str(note);
@@ -199,6 +208,8 @@ impl Plan {
             components: 0,
             asset_references: 0,
             entity_references: 0,
+            layer_names: self.manifest.layers.names.len(),
+            layer_masks: self.manifest.layers.masks.len(),
             unmatched: Vec::new(),
             dry_run,
             output: output.to_path_buf(),
@@ -305,6 +316,7 @@ fn plan_project(root: &Path, project: &OldProject) -> Result<Plan, ProjectMigrat
         search_paths,
         render: project.render.sanitized(),
         quality: project.quality.sanitized(),
+        layers: project.layers.sanitized(),
         input: root
             .join("input.ron")
             .is_file()

@@ -18,6 +18,7 @@ pub(crate) fn load_native_runtime(root: &Path) -> Result<Option<CookRuntime>, St
             input: manifest.input,
             render: manifest.render,
             quality: manifest.quality,
+            layers: manifest.layers,
         })),
         Err(StoreError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(format!("读取项目清单失败：{err}")),
@@ -34,9 +35,18 @@ pub(crate) fn load_runtime(root: &Path) -> Result<Option<CookRuntime>, String> {
 }
 
 pub(crate) fn scripted_runner(world: World, root: &Path) -> Result<ScriptedRunner, String> {
-    let search_paths = load_runtime(root)?.map_or_else(Vec::new, |runtime| runtime.search_paths);
-    let assets = asset_paths(Some(root), &search_paths);
-    Ok(ScriptedRunner::with_assets(world, assets).0)
+    let runtime = load_runtime(root)?.unwrap_or_default();
+    Ok(runner_with_runtime(world, root, &runtime))
+}
+
+pub(crate) fn runner_with_runtime(
+    mut world: World,
+    root: &Path,
+    runtime: &CookRuntime,
+) -> ScriptedRunner {
+    world.set_collision_layers(&runtime.layers);
+    let assets = asset_paths(Some(root), &runtime.search_paths);
+    ScriptedRunner::with_assets(world, assets).0
 }
 
 pub(crate) fn advance_world(

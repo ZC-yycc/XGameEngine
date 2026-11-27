@@ -42,6 +42,7 @@ fn applies_native_prefab_values_to_moved_guid_asset() {
             input: None,
             render: Default::default(),
             quality: Default::default(),
+            layers: Default::default(),
         },
     )
     .unwrap();

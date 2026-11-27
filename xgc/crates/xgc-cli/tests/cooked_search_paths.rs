@@ -29,6 +29,7 @@ fn cooked_run_uses_the_same_ordered_search_roots_as_the_project() {
             prefabs: "Prefabs".into(),
             scripts: "Scripts".into(),
         },
+        layers: Default::default(),
         search_paths: vec!["Zulu".into(), "Alpha".into()],
         input: Some("Config/actions.ron".into()),
         render: xgc_render::RenderSettings {

@@ -6,8 +6,13 @@
 mod broad_phase;
 
 use self::broad_phase::BroadPhase;
-use xgc_base::{EntityId, EntityKey};
-use xgc_world::{CollisionEvent, Component, PhysicsBody, Transform, Velocity, World};
+use xgc_base::{
+    layer::{CollisionMasks, LayerIndex},
+    EntityId, EntityKey,
+};
+use xgc_world::{
+    CollisionEvent, CollisionLayer, Component, PhysicsBody, Transform, Velocity, World,
+};
 
 use crate::{System, SystemAccess};
 
@@ -35,6 +40,7 @@ struct BodyBox {
     sphere: Option<f32>,
     dynamic: bool,
     sensor: bool,
+    layer: LayerIndex,
 }
 
 impl System for AabbCollisionSystem {
@@ -44,7 +50,7 @@ impl System for AabbCollisionSystem {
 
     fn access(&self) -> SystemAccess {
         SystemAccess {
-            reads: vec![PhysicsBody::ID],
+            reads: vec![PhysicsBody::ID, CollisionLayer::ID],
             writes: vec![Transform::ID, Velocity::ID],
         }
     }
@@ -53,6 +59,8 @@ impl System for AabbCollisionSystem {
         self.current.clear();
         let bodies = &mut self.bodies;
         bodies.clear();
+        let masks = world.collision_masks();
+        let filtered = !masks.all_enabled();
         world.for_each2::<Transform, PhysicsBody>(|key, transform, body| {
             let Some(entity) = world.entity(key) else {
                 return;
@@ -67,11 +75,16 @@ impl System for AabbCollisionSystem {
                 sphere: (body.shape == "ball").then_some(body.radius),
                 dynamic: body.is_dynamic(),
                 sensor: body.is_sensor,
+                layer: if filtered {
+                    world.collision_layer(key)
+                } else {
+                    LayerIndex::default()
+                },
             });
         });
         // ID 唯一，原地排序可保留求解顺序并省去排序临时区。
         bodies.sort_unstable_by_key(|body| body.id.raw());
-        solve_contacts(bodies, &mut self.broad_phase, &mut self.current);
+        solve_contacts(bodies, &mut self.broad_phase, &mut self.current, masks);
         for body in bodies.iter() {
             if let Some(transform) = world.get_mut::<Transform>(body.key) {
                 transform.position = body.position;
@@ -99,8 +112,10 @@ fn solve_contacts(
     bodies: &mut [BodyBox],
     broad_phase: &mut BroadPhase,
     pairs: &mut Vec<(u64, u64)>,
+    masks: &CollisionMasks,
 ) {
     const MAX_SPATIAL_QUERIES: usize = 4;
+    let filtered = !masks.all_enabled();
     let body_count = bodies.len();
     if body_count < 2 || !bodies.iter().any(|body| body.dynamic) {
         return;
@@ -123,6 +138,9 @@ fn solve_contacts(
             let (before, after) = bodies.split_at_mut(j);
             let left = &mut before[i];
             let right = &mut after[0];
+            if filtered && !masks.allows_pair(left.layer, right.layer) {
+                continue;
+            }
             let left_position = left.position.map(f32::to_bits);
             let right_position = right.position.map(f32::to_bits);
             if !resolve_pair(left, right) {
