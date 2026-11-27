@@ -102,6 +102,20 @@ CPU 与关节采样超出 6.7 ms 和 2 ms 预算。首次从内存世界恢复�
 
 在 `xgc/` 运行 `cargo test --locked --offline --release -p xgc-host --test script_city -- --ignored --nocapture --test-threads=1`。正式比较先单独构建，再串行运行同一测试产物。预算见[框架设计 §13.2](../Docs/引擎框架设计.md#132-预算)。
 
+## S5 流式遍历基线
+
+[中档基准](crates/xgc-host/tests/streaming.rs) 通过生产 `ScriptedRunner` 和 `Renderer` 在 60 个模拟秒内遍历 128 个分区，共 3,600 个固定步。128 个 GLB 合计 2,148,041,728 B，解码后的 RGBA8 纹理共 2,147,483,648 B。两次独立 Release 进程都首次导入全部 128 个资产，记录 2,575 帧常驻、127 帧回访、770 帧视距外。2,830 帧各有一次实际绘制，中心取样观察到 128 种颜色。两次整程末态及无头回放哈希均为 `10a0d1abf5619588`，首分区的初访与回访帧均为 `b4f069535f7d1645`。[资产夹具](crates/xgc-host/tests/streaming/fixture.rs)
+
+| 测量区间 | 第二轮 p50 / p95 / p99 ms | 两轮 p99 ms |
+|---|---:|---:|
+| 固定步入口到提交返回 | 0.227 / 0.430 / 23.705 | 27.965 / 23.705 |
+| 首次导入分区的固定步入口到提交 | 22.182 / 28.314 / 40.324 | 60.885 / 40.324 |
+| 固定步入口到读回围栏 | 0.945 / 2.062 / 32.850 | 37.996 / 32.850 |
+
+两轮各有 130 步超过 4 ms，进程峰值工作集为 2,470,846,464–2,471,084,032 B，均超出卡顿与内存预算。每轮在步进入口到提交期间有 653,804 次 / 8,814,799,330 B 当前线程分配请求。资产在分区首次可见时同步读取，已读取的资源留在缓存中。两轮都在 i7-10700、Windows 10、RTX 2060 / Vulkan / 610.88 上以 1280×720 单采样离屏运行，资产由独立进程生成，计时使用暖文件缓存。读回围栏记录墙钟，GPU 时间戳、进程显存和原生窗口 present 仍待实测。
+
+在 `xgc/` 执行 `cargo test --locked --offline --release -p xgc-host --test streaming -- --ignored --nocapture --test-threads=1` 运行小样本。正式样本先用 `XGC_S5_PROFILE=prepare-2gib` 生成资产，再以 `XGC_S5_PROFILE=2gib` 在新进程运行同一测试。两次使用同一会话目录，默认资产路径为 `tmp/xgc-s5/assets-2gib`。预算见[框架设计 §13.2](../Docs/引擎框架设计.md#132-预算)。
+
 ## S6 编辑器城基线
 
 [中档基准](crates/xgc-editor/src/app/editor_city_tests.rs) 通过生产 `EditorState` 和 egui 控件打开 50,000 实体的项目，含 49,949 条父子关系和 2,000 个绘制项。每轮检查层级选择、Inspector 改名、Undo 和 Redo 后的真实值，始末世界哈希均为 `ac57d14b6fbfaecc`。
