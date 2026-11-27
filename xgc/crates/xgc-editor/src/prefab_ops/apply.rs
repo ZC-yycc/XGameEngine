@@ -1,4 +1,4 @@
-//! Apply 的项目提交边界。场景草稿和其他实例的覆盖值不随来源删除落盘。
+//! Apply 的项目提交边界。只有当前草稿接收新增来源关联，场景磁盘只同步已删关联。
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -11,13 +11,14 @@ use xgc_store::{
     ProjectSession, StoreError,
 };
 use xgc_world::{
-    apply_prefab_removals, apply_prefab_values, detach_prefab_sources, World, WorldData,
+    apply_prefab_values, detach_prefab_sources, plan_prefab_apply, Command, ComponentData, World,
+    WorldData,
 };
 
 use crate::{AssetKind, EditorState, SceneFile};
 
 impl EditorState {
-    /// 从选中实例写回来源资产。项目可删除已保存的来源分支，仍保留场景草稿。
+    /// 从选中实例写回来源资产。项目提交可新增一个叶节点或删除完整来源分支。
     pub fn apply_selected_prefab(&mut self) -> Result<usize, String> {
         if self.is_playing() {
             return Err("Play 期间不能 Apply 预制体".into());
@@ -25,7 +26,8 @@ impl EditorState {
         let file = self.file.as_ref().ok_or("请先保存场景再 Apply 预制体")?;
         let (selected, path) = self.selected_prefab_path()?;
         if let (Some(project), Some(scene)) = (&self.project, &self.scene) {
-            let project = ProjectSession::open(project.root()).map_err(|err| err.to_string())?;
+            let mut project =
+                ProjectSession::open(project.root()).map_err(|err| err.to_string())?;
             project
                 .recover_prefab_apply()
                 .map_err(|err| err.to_string())?;
@@ -33,35 +35,23 @@ impl EditorState {
             let (saved, bytes) =
                 load_world_with_bytes(&file.path).map_err(|err| err.to_string())?;
             check_scene_baseline(file, &bytes)?;
-            let (candidate, removed) =
-                apply_prefab_removals(&self.world, &saved, &asset, selected)?;
-            let count = candidate.entities.len();
-            if removed.is_empty() {
-                project
-                    .apply_prefab_if_unchanged(
-                        &path,
-                        &candidate,
-                        &original,
-                        &[PrefabSceneChange {
-                            scene,
-                            path: &file.path,
-                            original: &file.bytes,
-                            replacement: None,
-                        }],
-                        || Ok(()),
-                    )
-                    .map_err(|err| format!("写回预制体失败：{err}"))?;
+            let plan = plan_prefab_apply(&self.world, &saved, &asset, selected)?;
+            let removed = plan.removed_sources().clone();
+            let minimum = plan.source_id_minimum();
+            let mut sources = if removed.is_empty() {
+                None
             } else {
-                let mut sources = Sources::new(project.root(), &path)?;
-                let active = SceneEdit::new(
-                    scene.clone(),
-                    file.path.clone(),
-                    bytes,
-                    saved,
-                    &mut sources,
-                    &removed,
-                )?;
-                let mut scenes = vec![active];
+                Some(Sources::new(project.root(), &path)?)
+            };
+            let mut scenes = vec![SceneEdit::new(
+                scene.clone(),
+                file.path.clone(),
+                bytes,
+                saved,
+                sources.as_mut(),
+                &removed,
+            )?];
+            if minimum.is_some() || !removed.is_empty() {
                 for other in &project.manifest().scenes {
                     if other == scene {
                         continue;
@@ -76,42 +66,79 @@ impl EditorState {
                         path,
                         bytes,
                         saved,
-                        &mut sources,
+                        sources.as_mut(),
                         &removed,
                     )?);
                 }
+            }
 
+            let source_id = if let Some(minimum) = minimum {
+                // 来源 ID 归资产所有。CAS 失败也不能把已发行的号还给项目。
+                let ids = project
+                    .reserve_entity_ids(1, minimum)
+                    .map_err(|err| format!("新增预制体叶节点领号失败：{err}"))?;
+                Some(EntityId::from_raw(ids.start))
+            } else {
+                None
+            };
+            let (candidate, binding) = plan.finish(source_id)?;
+            let mut updated_world = None;
+            let mut new_undo = None;
+            let mut detached_history = None;
+            if let Some((entity, binding)) = binding {
+                let before = self.world.world_data();
+                let mut world = World::new();
+                world.restore_world_data(&before)?;
+                let bind = world.plan(vec![Command::AddComponent {
+                    entity,
+                    component: ComponentData::from_component(&binding),
+                }]);
+                world
+                    .apply(&bind)
+                    .map_err(|err| format!("无法添加预制体来源关联：{err:?}"))?;
+                updated_world = Some(world);
+                new_undo = Some(before);
+            } else if let Some(sources) = &mut sources {
                 let mut draft = self.world.world_data();
-                let mut undo = self.undo.clone();
-                let mut redo = self.redo.clone();
-                let mut updated_world = None;
                 if sources.detach(&mut draft, &removed)? {
                     let mut world = World::new();
                     world.restore_world_data(&draft)?;
                     updated_world = Some(world);
                 }
+                let mut undo = self.undo.clone();
+                let mut redo = self.redo.clone();
                 for state in undo.iter_mut().chain(&mut redo) {
-                    // 撤销能还原已删除的实体，但关联的来源已从项目资产移除。
+                    // 撤销能还原旧实体，其来源关联已经随资产删除。
                     sources.detach(state, &removed)?;
                 }
+                detached_history = Some((undo, redo));
+            }
 
-                let changes: Vec<_> = scenes.iter().map(SceneEdit::change).collect();
-                let bytes = project
-                    .apply_prefab_if_unchanged(&path, &candidate, &original, &changes, || {
-                        Sources::new(project.root(), &path)
-                            .and_then(|mut sources| sources.check_dependencies(&removed))
-                            .map_err(StoreError::Format)
-                    })
-                    .map_err(|err| format!("写回预制体失败：{err}"))?;
-                self.file.as_mut().expect("活动场景已经保存").bytes =
-                    bytes.into_iter().next().expect("活动场景排在首位");
-                if let Some(world) = updated_world {
-                    self.world = world;
-                }
+            let changes: Vec<_> = scenes.iter().map(SceneEdit::change).collect();
+            let bytes = project
+                .apply_prefab_if_unchanged(&path, &candidate, &original, &changes, || {
+                    if removed.is_empty() {
+                        return Ok(());
+                    }
+                    Sources::new(project.root(), &path)
+                        .and_then(|mut sources| sources.check_dependencies(&removed))
+                        .map_err(StoreError::Format)
+                })
+                .map_err(|err| format!("写回预制体失败：{err}"))?;
+            self.file.as_mut().expect("活动场景已经保存").bytes =
+                bytes.into_iter().next().expect("活动场景排在首位");
+            if let Some(world) = updated_world {
+                self.world = world;
+            }
+            if let Some(before) = new_undo {
+                self.record_undo(before);
+                self.dirty = true;
+            }
+            if let Some((undo, redo)) = detached_history {
                 self.undo = undo;
                 self.redo = redo;
             }
-            Ok(count)
+            Ok(candidate.entities.len())
         } else {
             let (asset, expected) =
                 load_prefab_with_bytes(&path).map_err(|err| format!("读取预制体失败：{err}"))?;
@@ -146,15 +173,18 @@ impl SceneEdit {
         path: PathBuf,
         original: Vec<u8>,
         mut data: WorldData,
-        sources: &mut Sources<'_>,
+        sources: Option<&mut Sources<'_>>,
         removed: &BTreeSet<EntityId>,
     ) -> Result<Self, String> {
-        let changed = sources.detach(&mut data, removed)?;
+        let replacement = match sources {
+            Some(sources) => sources.detach(&mut data, removed)?.then_some(data),
+            None => None,
+        };
         Ok(Self {
             scene,
             path,
             original,
-            replacement: changed.then_some(data),
+            replacement,
         })
     }
 

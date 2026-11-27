@@ -2,7 +2,7 @@
 
 mod apply;
 
-pub use apply::{apply_prefab_removals, apply_prefab_values, detach_prefab_sources};
+pub use apply::{apply_prefab_values, detach_prefab_sources, plan_prefab_apply, PrefabApplyPlan};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;

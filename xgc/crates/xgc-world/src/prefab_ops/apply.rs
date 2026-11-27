@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use xgc_base::EntityId;
 
 use crate::{
-    EntityData, GlobalTransform, Parent, PluginComponent, PrefabInstance, Script, Transform, World,
-    WorldData,
+    EntityData, GlobalTransform, Parent, PluginComponent, PrefabInstance, Script, Transform, Value,
+    World, WorldData,
 };
 
 use super::{find_root, instance_entities, read_component, rebuild_globals, remap_parent};
@@ -44,16 +44,65 @@ pub fn apply_prefab_values(
     prefab: &WorldData,
     selected: EntityId,
 ) -> Result<WorldData, String> {
-    project_prefab(world, prefab, selected, None).map(|(asset, _)| asset)
+    project_prefab(world, prefab, selected, None).map(|plan| plan.asset)
 }
 
-/// 项目提交还可以删除完整的来源分支，并以返回的源 ID 集解除其他实例的关联。
-pub fn apply_prefab_removals(
+/// 资产与实例关联的投影。只有验证完的单叶新增才需要向项目领号。
+pub struct PrefabApplyPlan {
+    asset: WorldData,
+    removed: BTreeSet<EntityId>,
+    new_leaf: Option<NewLeaf>,
+}
+
+struct NewLeaf {
+    local: EntityId,
+    source: String,
+    minimum: EntityId,
+}
+
+impl PrefabApplyPlan {
+    pub fn removed_sources(&self) -> &BTreeSet<EntityId> {
+        &self.removed
+    }
+
+    /// 需要为资产新增的叶节点领号时，给出分配下限。
+    pub fn source_id_minimum(&self) -> Option<EntityId> {
+        self.new_leaf.as_ref().map(|leaf| leaf.minimum)
+    }
+
+    /// 用项目已发行的来源 ID 完成资产，返回需要写回当前草稿的关联。
+    pub fn finish(
+        mut self,
+        source_id: Option<EntityId>,
+    ) -> Result<(WorldData, Option<(EntityId, PrefabInstance)>), String> {
+        let binding = match (self.new_leaf, source_id) {
+            (None, None) => None,
+            (Some(leaf), Some(id)) if id >= leaf.minimum && id.validate().is_ok() => {
+                // 只有新行使用占位 ID，任何父引用均已指向已有来源实体。
+                self.asset.entities.last_mut().expect("已投影新增叶节点").id = id;
+                self.asset.next_id = id.raw() + 1;
+                Some((
+                    leaf.local,
+                    PrefabInstance {
+                        source: leaf.source,
+                        source_id: id.raw(),
+                        root: false,
+                    },
+                ))
+            }
+            _ => return Err("新增预制体叶节点与项目发行的实体 ID 不匹配".into()),
+        };
+        Ok((self.asset, binding))
+    }
+}
+
+/// 以已保存的实例为结构基准，共用值投影并检查新增或删除所需的身份。
+pub fn plan_prefab_apply(
     world: &World,
     saved_scene: &WorldData,
     prefab: &WorldData,
     selected: EntityId,
-) -> Result<(WorldData, BTreeSet<EntityId>), String> {
+) -> Result<PrefabApplyPlan, String> {
     project_prefab(world, prefab, selected, Some(saved_scene))
 }
 
@@ -62,7 +111,7 @@ fn project_prefab(
     prefab: &WorldData,
     selected: EntityId,
     saved_scene: Option<&WorldData>,
-) -> Result<(WorldData, BTreeSet<EntityId>), String> {
+) -> Result<PrefabApplyPlan, String> {
     let (root, instance) = find_root(world, selected)?;
     let source_root = EntityId::from_raw(instance.source_id);
     let parents = asset_parents(world, prefab, source_root)?;
@@ -75,29 +124,8 @@ fn project_prefab(
     if current.keys().any(|source| !parents.contains_key(source)) {
         return Err("预制体实体的来源 ID 已变化，需要结构性 Apply".into());
     }
-    if !removed.is_empty() {
-        let saved_scene = saved_scene.ok_or("预制体实体结构已变化，需要结构性 Apply")?;
-        if parents.iter().any(|(id, parent)| {
-            !removed.contains(id) && parent.is_some_and(|parent| removed.contains(&parent))
-        }) {
-            return Err("结构性 Apply 删除的来源分支仍有存活子节点".into());
-        }
-        // 仅凭当前父链会把重挂接和解除关联错判为删除，须用同一实例的磁盘基准确认。
-        let mut saved = World::new();
-        saved.restore_world_data(saved_scene)?;
-        let (saved_root, saved_instance) = find_root(&saved, root)?;
-        if saved_root != root || saved_instance != instance {
-            return Err("结构性 Apply 需要与磁盘同源的实例根".into());
-        }
-        let earlier = instance_entities(&saved, root, saved_instance)?;
-        for source in &removed {
-            if earlier
-                .get(source)
-                .is_none_or(|id| world.key(*id).is_some())
-            {
-                return Err(format!("来源实体 {source} 需要从已保存实例中删除"));
-            }
-        }
+    if !removed.is_empty() && saved_scene.is_none() {
+        return Err("预制体实体结构已变化，需要结构性 Apply".into());
     }
 
     let source_ids: BTreeMap<_, _> = current.iter().map(|(&source, &id)| (id, source)).collect();
@@ -107,16 +135,51 @@ fn project_prefab(
             return Err(format!("预制体实例根的外部父实体无效：{}", parent.entity));
         }
     }
-    let mut added = None;
+    let mut added = BTreeSet::new();
     world.for_each::<Parent>(|key, parent| {
         if let Some(id) = world.entity(key) {
             if source_ids.contains_key(&parent.entity) && !source_ids.contains_key(&id) {
-                added = Some(added.map_or(id, |previous: EntityId| previous.min(id)));
+                added.insert(id);
             }
         }
     });
-    if let Some(id) = added {
-        return Err(format!("预制体子树新增了实体 {id}，需要结构性 Apply"));
+    let mut new_leaf = None;
+    if !removed.is_empty() || !added.is_empty() {
+        let saved_scene = saved_scene.ok_or_else(|| {
+            format!(
+                "预制体子树新增了实体 {}，需要结构性 Apply",
+                added.first().expect("存在新增实体")
+            )
+        })?;
+        // 只看当前父链会把重挂接和 Undo 解除来源关联误判成删除及新增。
+        let mut saved = World::new();
+        saved.restore_world_data(saved_scene)?;
+        let (saved_root, saved_instance) = find_root(&saved, root)?;
+        if saved_root != root || saved_instance != instance {
+            return Err("结构性 Apply 需要与磁盘同源的实例根".into());
+        }
+        let earlier = instance_entities(&saved, root, saved_instance)?;
+        if let Some(&id) = added.first() {
+            if !removed.is_empty() {
+                return Err("来源关联有缺失，不能新增叶节点。刚撤销的关联可以通过重做恢复".into());
+            }
+            if earlier != current {
+                return Err("新增叶节点需要已保存的完整实例，请先保存草稿中的来源关联".into());
+            }
+            if added.len() != 1 {
+                return Err("结构性 Apply 一次只能新增一个叶节点".into());
+            }
+            new_leaf = Some(project_leaf(
+                world,
+                prefab,
+                instance,
+                &parents,
+                &source_ids,
+                id,
+            )?);
+        } else {
+            validate_removals(world, &parents, &removed, &earlier)?;
+        }
     }
 
     let mut candidate = prefab.clone();
@@ -136,11 +199,111 @@ fn project_prefab(
         remap_parent(&mut incoming, &source_ids);
         apply_components(entity, incoming, is_root)?;
     }
-    if !removed.is_empty() {
+    let new_leaf = new_leaf.map(|(leaf, row)| {
+        candidate.entities.push(row);
+        leaf
+    });
+    if !removed.is_empty() || new_leaf.is_some() {
         asset_parents(world, &candidate, source_root)?;
     }
     rebuild_globals(&mut candidate.entities, None, &[], Some(source_root))?;
-    Ok((candidate, removed))
+    Ok(PrefabApplyPlan {
+        asset: candidate,
+        removed,
+        new_leaf,
+    })
+}
+
+fn validate_removals(
+    world: &World,
+    parents: &BTreeMap<EntityId, Option<EntityId>>,
+    removed: &BTreeSet<EntityId>,
+    earlier: &BTreeMap<EntityId, EntityId>,
+) -> Result<(), String> {
+    if parents.iter().any(|(id, parent)| {
+        !removed.contains(id) && parent.is_some_and(|parent| removed.contains(&parent))
+    }) {
+        return Err("结构性 Apply 删除的来源分支仍有存活子节点".into());
+    }
+    for source in removed {
+        if earlier
+            .get(source)
+            .is_none_or(|id| world.key(*id).is_some())
+        {
+            return Err(format!("来源实体 {source} 需要从已保存实例中删除"));
+        }
+    }
+    Ok(())
+}
+
+fn project_leaf(
+    world: &World,
+    prefab: &WorldData,
+    instance: &PrefabInstance,
+    parents: &BTreeMap<EntityId, Option<EntityId>>,
+    source_ids: &BTreeMap<EntityId, EntityId>,
+    id: EntityId,
+) -> Result<(NewLeaf, EntityData), String> {
+    let mut row = world
+        .entity_data(id)
+        .ok_or_else(|| format!("无法读取新增实例实体：{id}"))?;
+    if row
+        .components
+        .iter()
+        .any(|component| component.component == PrefabInstance::ID)
+    {
+        return Err(format!("新增实体 {id} 已有关联的预制体来源"));
+    }
+    let mut has_children = false;
+    world.for_each::<Parent>(|_, parent| has_children |= parent.entity == id);
+    if has_children {
+        return Err(format!("新增实体 {id} 不是叶节点"));
+    }
+    if parents.contains_key(&id) {
+        return Err(format!("草稿实体 {id} 与现有资产实体 ID 冲突"));
+    }
+    // 当前实例化仅重写 Parent，因此不能把其他字段里的场景 ID 带进资产。
+    if row
+        .components
+        .iter()
+        .filter(|component| component.component != Parent::ID)
+        .flat_map(|component| &component.fields)
+        .any(|(_, value)| contains_entity_reference(value))
+    {
+        return Err(format!("新增实体 {id} 含有无法映射的场景实体引用"));
+    }
+    remap_parent(&mut row, source_ids);
+    row.revision = prefab.revision;
+    let last = parents.last_key_value().expect("资产根已校验").0.raw();
+    let minimum = EntityId::from_raw(
+        prefab
+            .next_id
+            .max(world.next_entity_id().raw())
+            .max(last.max(id.raw()) + 1),
+    );
+    minimum
+        .validate()
+        .map_err(|err| format!("新增预制体叶节点无法领号：{err}"))?;
+    Ok((
+        NewLeaf {
+            local: id,
+            source: instance.source.clone(),
+            minimum,
+        },
+        row,
+    ))
+}
+
+fn contains_entity_reference(value: &Value) -> bool {
+    match value {
+        Value::Entity(_) => true,
+        Value::List(values) => values.iter().any(contains_entity_reference),
+        Value::Struct(values) | Value::Map(values) => {
+            values.values().any(contains_entity_reference)
+        }
+        Value::Enum { payload, .. } => contains_entity_reference(payload),
+        _ => false,
+    }
 }
 
 fn apply_components(

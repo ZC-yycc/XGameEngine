@@ -319,6 +319,188 @@ fn structural_apply_detaches_removed_source_members_across_registered_scenes() {
     assert!(second.save().unwrap_err().contains("外部修改"));
 }
 
+#[test]
+fn structural_apply_adds_one_leaf_and_undo_redo_changes_only_its_draft_link() {
+    let fixture = Fixture::new();
+    let a = fixture.0.join(FIRST_SCENE);
+    let b = fixture.0.join(SECOND_SCENE);
+    let path = fixture.0.join(PREFAB);
+    let meta = fixture.0.join(format!("{PREFAB}.meta"));
+    let unrelated_asset = fixture.0.join("Prefabs/other.prefab.json");
+    let manifest = fixture.0.join("project.xgc");
+    let scene_parent = EntityId::from_raw(1);
+    let source_root = EntityId::from_raw(3);
+    let mut saved_scene = document(scene_parent.raw());
+    saved_scene.entities[0]
+        .components
+        .push(ComponentData::from_component(&Name {
+            value: "已保存的场景实体".into(),
+        }));
+    save_world(&a, &saved_scene).unwrap();
+    save_world(&b, &document(2)).unwrap();
+    let mut asset = document(source_root.raw());
+    asset.entities[0]
+        .components
+        .push(ComponentData::from_component(&Transform {
+            position: [1.0, 2.0, 3.0],
+            ..Transform::default()
+        }));
+    save_prefab(&path, &asset).unwrap();
+    save_prefab(&unrelated_asset, &document(4)).unwrap();
+    let source = format!("guid://{GUID}");
+    fs::write(&meta, format!("(guid: \"{GUID}\")")).unwrap();
+    fixture.save_manifest();
+
+    let mut first = EditorState::open(&a).unwrap();
+    let mut second = EditorState::open(&b).unwrap();
+    let root = first.instantiate_prefab_file(Path::new(PREFAB)).unwrap();
+    let other_root = second.instantiate_prefab_file(Path::new(PREFAB)).unwrap();
+    let placed_at = [7.0, 8.0, 9.0];
+    first.set_entity_position(root, placed_at).unwrap();
+    first.add_component(root, Parent::NAME).unwrap();
+    first
+        .edit_field(
+            root,
+            Parent::ID.0,
+            "entity",
+            Value::Entity(scene_parent.raw()),
+        )
+        .unwrap();
+    second
+        .edit_field(
+            other_root,
+            PrefabInstance::ID.0,
+            "source",
+            Value::String(PREFAB.into()),
+        )
+        .unwrap();
+    first.save().unwrap();
+    second.save().unwrap();
+
+    let child = first.spawn_entity("发布到资产的叶子").unwrap();
+    first.add_component(child, Parent::NAME).unwrap();
+    first
+        .edit_field(child, Parent::ID.0, "entity", Value::Entity(root.raw()))
+        .unwrap();
+    first
+        .edit_field(
+            scene_parent,
+            Name::ID.0,
+            "value",
+            Value::String("只保留在当前草稿".into()),
+        )
+        .unwrap();
+    let later = second.spawn_entity("另一会话随后领号").unwrap();
+    assert_eq!(
+        [root.raw(), other_root.raw(), child.raw(), later.raw()],
+        [10, 11, 12, 13]
+    );
+    first.select(Some(root));
+    let guarded_paths = [&a, &b, &meta, &unrelated_asset];
+    let guarded_before = guarded_paths.map(|file| fs::read(file).unwrap());
+    let draft_before = first.world().world_data();
+
+    assert_eq!(first.apply_selected_prefab().unwrap(), 2);
+    let source_child = EntityId::from_raw(14);
+    let draft_after = first.world().world_data();
+    let mut unbound = draft_after.clone();
+    let adopted = unbound
+        .entities
+        .iter_mut()
+        .find(|entity| entity.id == child)
+        .unwrap();
+    let previous = draft_before
+        .entities
+        .iter()
+        .find(|entity| entity.id == child)
+        .unwrap();
+    let binding = ComponentData::from_component(&PrefabInstance {
+        source,
+        source_id: source_child.raw(),
+        root: false,
+    });
+    assert!(adopted.components.contains(&binding));
+    adopted
+        .components
+        .retain(|component| component.component != PrefabInstance::ID);
+    adopted.revision = previous.revision;
+    unbound.revision = draft_before.revision;
+    assert_eq!(unbound, draft_before);
+    assert_eq!(first.entity_position(root), Some(placed_at));
+    assert_eq!(first.selected(), Some(root));
+    assert!(first.is_dirty());
+
+    let applied = load_prefab(&path).unwrap();
+    assert_eq!(applied.next_id, 15);
+    assert_eq!(applied.entities[0], asset.entities[0]);
+    let mut expected_components = previous.components.clone();
+    for component in &mut expected_components {
+        if component.component == Parent::ID {
+            *component = ComponentData::from_component(&Parent {
+                entity: source_root,
+            });
+        }
+    }
+    assert_eq!(applied.entities.len(), 2);
+    let adopted = &applied.entities[1];
+    assert_eq!(adopted.id, source_child);
+    assert_eq!(adopted.components, expected_components);
+    assert_eq!(
+        xgc_store::load_project(&manifest).unwrap().next_entity_id,
+        15
+    );
+    assert_eq!(
+        guarded_paths.map(|file| fs::read(file).unwrap()),
+        guarded_before
+    );
+    let asset_bytes = fs::read(&path).unwrap();
+    let manifest_bytes = fs::read(&manifest).unwrap();
+
+    assert_eq!(first.apply_selected_prefab().unwrap(), 2);
+    // 撤销只移除草稿关联。发布后的叶子既不能凭名字认回，也不能再领一个来源 ID。
+    let assert_undo_redo = |editor: &mut EditorState| {
+        assert!(editor.undo().unwrap());
+        assert_eq!(editor.world().world_data(), draft_before);
+        assert!(editor.apply_selected_prefab().is_err());
+        assert_eq!(editor.world().world_data(), draft_before);
+        assert_eq!(fs::read(&path).unwrap(), asset_bytes);
+        assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
+        assert!(editor.redo().unwrap());
+        assert_eq!(editor.world().world_data(), draft_after);
+        assert!(editor.is_dirty());
+    };
+    assert_undo_redo(&mut first);
+    assert_eq!(
+        guarded_paths.map(|file| fs::read(file).unwrap()),
+        guarded_before
+    );
+
+    first.save().unwrap();
+    assert_eq!(load_world(&a).unwrap(), draft_after);
+    let saved_bytes = fs::read(&a).unwrap();
+    assert_undo_redo(&mut first);
+    assert_eq!(fs::read(&a).unwrap(), saved_bytes);
+    assert_eq!(fs::read(&b).unwrap(), guarded_before[1]);
+
+    assert!(first.undo().unwrap());
+    first
+        .edit_field(
+            scene_parent,
+            Name::ID.0,
+            "value",
+            Value::String("清空重做后仍保留草稿".into()),
+        )
+        .unwrap();
+    assert!(!first.can_redo());
+    let branched_draft = first.world().world_data();
+    assert!(first.apply_selected_prefab().is_err());
+    assert_eq!(first.world().world_data(), branched_draft);
+    assert_eq!(fs::read(&path).unwrap(), asset_bytes);
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
+    assert_eq!(fs::read(a).unwrap(), saved_bytes);
+    assert_eq!(fs::read(b).unwrap(), guarded_before[1]);
+}
+
 fn document(id: u64) -> WorldData {
     WorldData {
         next_id: 10,
