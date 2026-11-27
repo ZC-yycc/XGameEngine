@@ -8,6 +8,8 @@ mod inspector;
 mod toolbar;
 
 #[cfg(test)]
+mod editor_city_tests;
+#[cfg(test)]
 mod hud_tests;
 #[cfg(test)]
 mod reload_tests;
