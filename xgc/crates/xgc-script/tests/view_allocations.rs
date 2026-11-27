@@ -127,7 +127,7 @@ function update(ctx)
     local id = self_id(ctx)
     local old = entity_pos(ctx, id)
     set_pos(ctx, source.x, old.y + source.y, source.z)
-    assert(entity_pos(ctx, id).y == old.y)
+    assert(entity_pos(ctx, id).y == old.y + source.y)
 end
 "#
         ),

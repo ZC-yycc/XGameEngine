@@ -11,20 +11,7 @@ use xgc_world::{Script, Transform, World};
 /// 相机只转 yaw、俯仰为 0，画面整体歪斜（showcase 截图因此整帧偏移）。
 #[test]
 fn legacy_look_at_aims_forward_without_roll() {
-    let dir = std::env::temp_dir().join(format!(
-        "xgc_lua_look_at_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("aim.lua"),
-        "function update(ctx) look_at(ctx, 0.0, 1.0, 1.8) end\n",
-    )
-    .unwrap();
+    let dir = ScriptDir::with_source("function update(ctx) look_at(ctx, 0.0, 1.0, 1.8) end");
     let mut world = World::new();
     let camera = world.spawn((
         Transform {
@@ -35,7 +22,7 @@ fn legacy_look_at_aims_forward_without_roll() {
             paths: vec!["aim.lua".into()],
         },
     ));
-    let mut runtime = xgc_script::ScriptRuntime::new(&dir);
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir.0);
     runtime.run_frame(&mut world, 1.0 / 60.0);
 
     let rotation = world.get::<Transform>(camera).unwrap().rotation;
@@ -56,7 +43,79 @@ fn legacy_look_at_aims_forward_without_roll() {
         up[0].abs() < 0.3 && up[2].abs() < 0.4,
         "up 被滚转了：{up:?}"
     );
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(runtime.take_error(), None);
+}
+
+#[test]
+fn look_at_reads_the_position_written_earlier_in_the_hook() {
+    let dir = ScriptDir::with_source(
+        r#"
+local frame = 0
+function update(ctx)
+    frame = frame + 1
+    local id = self_id(ctx)
+    if frame == 1 then
+        set_pos(ctx, 2, 3, 4)
+        look_at(ctx, 2, 3, 3)
+        assert(pos(ctx).x == 2 and entity_pos(ctx, id).z == 4)
+    else
+        set_pos(ctx, 0, 0, 0)
+        xgc.set(id, "core.transform", "position", {x = 5, y = 6, z = 7})
+        look_at(ctx, 6, 6, 7)
+        assert(pos(ctx).z == 7 and entity_pos(ctx, id).x == 5)
+    end
+end
+"#,
+    );
+    let mut world = World::new();
+    let camera = world.spawn((
+        Transform {
+            position: [7.0, 10.0, 0.0],
+            ..Transform::default()
+        },
+        Script {
+            paths: vec!["aim.lua".into()],
+        },
+    ));
+    let mut runtime = xgc_script::ScriptRuntime::new(&dir.0);
+    for (position, expected_forward) in [
+        ([2.0, 3.0, 4.0], [0.0, 0.0, -1.0]),
+        ([5.0, 6.0, 7.0], [1.0, 0.0, 0.0]),
+    ] {
+        runtime.run_frame(&mut world, 1.0 / 60.0);
+        let transform = world.get::<Transform>(camera).unwrap();
+        assert_eq!(transform.position, position);
+        let forward = rotate(transform.rotation, [0.0, 0.0, -1.0]);
+        for axis in 0..3 {
+            assert!(
+                (forward[axis] - expected_forward[axis]).abs() < 1e-5,
+                "look_at 的朝向 {forward:?} 应为 {expected_forward:?}"
+            );
+        }
+        assert_eq!(runtime.take_error(), None);
+    }
+}
+
+struct ScriptDir(std::path::PathBuf);
+
+impl ScriptDir {
+    fn with_source(source: &str) -> Self {
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("xgc_lua_look_at_{}_{time}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("aim.lua"), source).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for ScriptDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn rotate(rotation: [f32; 4], vector: [f32; 3]) -> [f32; 3] {

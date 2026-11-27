@@ -1,8 +1,8 @@
 //! 每帧只读快照：脚本在 `update(ctx)` 里看到的实体状态。
 //!
 //! 写操作一律进命令队列，不直接改 `World`；视图在每帧脚本调用前刷新一次
-//! （`runtime::refresh_view`）。动画参数和层栈保留本帧待结算的最新值，供按名
-//! 的 Lua setter 和动态路径写入按调用顺序累积。
+//! （`runtime::refresh_view`）。位置、动画参数和层栈保留本帧待结算的最新值，
+//! 供 Lua setter 和动态路径写入按调用顺序累积。
 
 use std::collections::BTreeMap;
 
@@ -34,7 +34,7 @@ pub struct UiElementView {
 pub struct EntityView {
     pub id: u64,
     pub name: String,
-    pub position: [f32; 3],
+    pub position: Option<[f32; 3]>,
     pub rotation: [f32; 4],
     pub velocity: [f32; 3],
     /// 是否有 `core.velocity`；角色脚本第一次移动时可能要先补这个组件。
@@ -59,9 +59,9 @@ pub struct EntityView {
 impl EntityView {
     pub(crate) fn refresh(&mut self, world: &World, id: EntityId, key: EntityKey) {
         self.id = id.raw();
-        let transform = world.get::<Transform>(key).copied().unwrap_or_default();
-        self.position = transform.position;
-        self.rotation = transform.rotation;
+        let transform = world.get::<Transform>(key);
+        self.position = transform.map(|transform| transform.position);
+        self.rotation = transform.map_or_else(|| Transform::default().rotation, |t| t.rotation);
 
         let velocity = world.get::<Velocity>(key);
         self.has_velocity = velocity.is_some();
@@ -212,7 +212,7 @@ impl ScriptView {
         Some(row)
     }
 
-    pub(crate) fn stage_animation_field(
+    pub(crate) fn stage_field(
         &mut self,
         id: u64,
         component: ComponentId,
@@ -220,6 +220,14 @@ impl ScriptView {
         value: &Value,
     ) {
         // 视图跟随调用顺序，实际校验与提交由世界事务负责。
+        if component == Transform::ID && field == "position" {
+            if let Some(position) = value.as_vec3() {
+                if let Some(staged) = self.entity_mut(id).and_then(|row| row.position.as_mut()) {
+                    *staged = position;
+                }
+            }
+            return;
+        }
         if component != AnimationState::ID && component != AnimationLayers::ID {
             return;
         }

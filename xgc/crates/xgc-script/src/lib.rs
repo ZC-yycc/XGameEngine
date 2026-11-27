@@ -117,8 +117,7 @@ impl LuaHost {
                     let component = component_id(&component)?;
                     let value = lua_to_value(&value)?;
                     if let Some(view) = &view {
-                        view.borrow_mut()
-                            .stage_animation_field(id, component, &field, &value);
+                        view.borrow_mut().stage_field(id, component, &field, &value);
                     }
                     set_commands.borrow_mut().push(Command::SetField {
                         entity: EntityId::from_raw(id),

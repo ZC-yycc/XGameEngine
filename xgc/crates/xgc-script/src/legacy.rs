@@ -86,24 +86,23 @@ pub(crate) fn register(
                 let entity = view
                     .entity(id)
                     .ok_or_else(|| mlua::Error::RuntimeError(format!("实体 {id} 不存在")))?;
-                vector_table(lua, entity.position)
+                vector_table(lua, entity.position.unwrap_or_default())
             })
             .map_err(|err| err.to_string())?,
         )
         .map_err(|err| err.to_string())?;
 
     let set_pos_commands = Rc::clone(commands);
+    let set_pos_view = Rc::clone(view);
     globals
         .set(
             "set_pos",
             lua.create_function(move |_, (_ctx, x, y, z): (mlua::Value, f32, f32, f32)| {
-                push_set(
-                    &set_pos_commands,
-                    self_id,
-                    Transform::ID,
-                    "position",
-                    FieldValue::Vec3([f64::from(x), f64::from(y), f64::from(z)]),
-                );
+                let value = FieldValue::Vec3([x, y, z].map(f64::from));
+                set_pos_view
+                    .borrow_mut()
+                    .stage_field(self_id, Transform::ID, "position", &value);
+                push_set(&set_pos_commands, self_id, Transform::ID, "position", value);
                 Ok(())
             })
             .map_err(|err| err.to_string())?,
@@ -160,7 +159,7 @@ pub(crate) fn register(
                 let view = look_view.borrow();
                 let position = view
                     .entity(self_id)
-                    .map(|entity| entity.position)
+                    .and_then(|entity| entity.position)
                     .unwrap_or([0.0; 3]);
                 let direction = [tx - position[0], ty - position[1], tz - position[2]];
                 let length = (direction[0] * direction[0]
@@ -457,7 +456,7 @@ fn register_script_state(
                 let view = pos_view.borrow();
                 let position = view
                     .entity(self_id)
-                    .map(|entity| entity.position)
+                    .and_then(|entity| entity.position)
                     .unwrap_or([0.0, 0.0, 0.0]);
                 vector_table(lua, position)
             })

@@ -187,6 +187,7 @@ fn spawn_entity(
             EntityView {
                 id,
                 name: name.to_string(),
+                position: Some([0.0; 3]),
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 ui: Some(ui_view),
                 has_interaction: true,

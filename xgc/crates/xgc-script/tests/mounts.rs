@@ -337,6 +337,8 @@ fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() 
         ui_set_text(nil, self_id(nil), 'candidate text')
         set_velocity(nil, self_id(nil), 1, 2, 3)
         assert(velocity(nil, self_id(nil)).y == 2)
+        set_pos(nil, 10, 20, 30)
+        assert(pos(nil).x == 10)
         set_bus_volume(nil, 'bgm', 0.125)
         play_sound(nil, 'candidate.wav', 1, 1)
         table.concat = function() return 'candidate library' end
@@ -348,7 +350,7 @@ fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() 
     );
     scripts.write(
         "b.lua",
-        "function update(ctx) end; error('last mount rejected')",
+        "assert(pos(nil).x == 0); function update(ctx) end; error('last mount rejected')",
     );
 
     let assert_no_audio_effect = |runtime: &mut ScriptRuntime| {
@@ -378,6 +380,7 @@ fn reload_replaces_all_mounts_together_without_publishing_initializer_effects() 
     assert_no_audio_effect(&mut runtime);
     step(&mut runtime, &mut world);
     assert_eq!(world.get::<UiElement>(entity).unwrap().text, "ababAB");
+    assert_eq!(world.get::<Transform>(entity).unwrap().position, [0.0; 3]);
     assert_eq!(world.len(), 1);
     assert_eq!(world.drain_body_velocities().next(), None);
 }
