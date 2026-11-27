@@ -1,6 +1,10 @@
 //! 标准库的动态加载仍使用同一 VM 的内存和指令上限。
 
-use std::{cell::RefCell, fmt};
+use std::{
+    cell::{Cell, RefCell},
+    fmt,
+    rc::Rc,
+};
 
 use mlua::{Function, Lua, String as LuaString, Table, Value};
 
@@ -73,7 +77,83 @@ pub(super) fn configure(lua: &Lua) -> mlua::Result<Function> {
 }
 
 pub(super) fn module_environment(lua: &Lua, load_factory: &Function) -> mlua::Result<Table> {
-    let globals = lua.globals();
+    let fallback = copy_globals(lua, lua.globals())?;
+    let (environment, _) = environment(lua, load_factory, fallback)?;
+    Ok(environment)
+}
+
+/// 挂载初始化只执行一次。先记录是否取用了实体绑定，返回批回调时再封住这些入口。
+pub(super) struct MountEnvironment {
+    environment: Table,
+    metatable: Table,
+    mounted: Table,
+    standard: Table,
+    used_mount_binding: Rc<Cell<bool>>,
+}
+
+impl MountEnvironment {
+    pub(super) fn new(lua: &Lua, load_factory: &Function, base: &Table) -> mlua::Result<Self> {
+        let mounted = copy_globals(lua, lua.globals())?;
+        let standard = lua.create_table()?;
+        let bindings = lua.create_table()?;
+        let globals = lua.globals();
+        for pair in mounted.pairs::<Value, Value>() {
+            let (key, value) = pair?;
+            if globals.raw_get::<Value>(key.clone())? == base.raw_get::<Value>(key.clone())? {
+                // 顶层对本模块标准库副本的修改也要随候选环境一起保留。
+                standard.raw_set(key, value)?;
+            } else {
+                bindings.raw_set(key, true)?;
+            }
+        }
+        let used_mount_binding = Rc::new(Cell::new(false));
+        let probe = Rc::clone(&used_mount_binding);
+        let available = mounted.clone();
+        let resolve = lua.create_function(move |_, (_env, name): (Table, Value)| {
+            if bindings
+                .raw_get::<Option<bool>>(name.clone())?
+                .unwrap_or(false)
+            {
+                probe.set(true);
+            }
+            available.raw_get::<Value>(name)
+        })?;
+        let (environment, metatable) = environment(lua, load_factory, resolve)?;
+        Ok(Self {
+            environment,
+            metatable,
+            mounted,
+            standard,
+            used_mount_binding,
+        })
+    }
+
+    pub(super) fn table(&self) -> Table {
+        self.environment.clone()
+    }
+
+    pub(super) fn finish(self, batch: bool) -> mlua::Result<Table> {
+        if batch && self.used_mount_binding.get() {
+            return Err(mlua::Error::RuntimeError(
+                "批模块初始化只使用标准库，实体读写请放在 update(batch) 内".into(),
+            ));
+        }
+        let globals = if batch { self.standard } else { self.mounted };
+        self.metatable.raw_set("__index", globals)?;
+        Ok(self.environment)
+    }
+}
+
+pub(super) fn globals_before_mount(lua: &Lua) -> mlua::Result<Table> {
+    let base = lua.create_table()?;
+    for pair in lua.globals().pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        base.raw_set(key, value)?;
+    }
+    Ok(base)
+}
+
+fn copy_globals(lua: &Lua, globals: Table) -> mlua::Result<Table> {
     let fallback = lua.create_table()?;
     for pair in globals.pairs::<mlua::String, Value>() {
         let (key, value) = pair?;
@@ -93,12 +173,20 @@ pub(super) fn module_environment(lua: &Lua, load_factory: &Function) -> mlua::Re
         };
         fallback.raw_set(key, value)?;
     }
+    Ok(fallback)
+}
+
+fn environment(
+    lua: &Lua,
+    load_factory: &Function,
+    fallback: impl mlua::IntoLua,
+) -> mlua::Result<(Table, Table)> {
     let environment = lua.create_table()?;
     let metatable = lua.create_table()?;
     metatable.raw_set("__index", fallback)?;
     metatable.raw_set("__metatable", false)?;
-    environment.set_metatable(Some(metatable));
+    environment.set_metatable(Some(metatable.clone()));
     environment.raw_set("_G", environment.clone())?;
     environment.raw_set("load", load_factory.call::<Function>(environment.clone())?)?;
-    Ok(environment)
+    Ok((environment, metatable))
 }

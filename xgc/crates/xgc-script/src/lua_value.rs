@@ -1,7 +1,7 @@
 //! 脚本字段读写与反射值之间的转换。
 
-use mlua::Lua;
-use xgc_world::Value;
+use mlua::{Lua, Value as LuaValue};
+use xgc_world::{FieldSchema, Value};
 
 pub(super) fn value_to_lua(lua: &Lua, value: &Value) -> mlua::Result<mlua::Value> {
     Ok(match value {
@@ -69,6 +69,73 @@ pub(super) fn lua_to_value(value: &mlua::Value) -> mlua::Result<Value> {
             other.type_name()
         ))),
     }
+}
+
+/// 批字段跟随注册表解释容器、四元数、实体 ID 和 Lua 整数相对于浮点字段的含义。
+pub(super) fn lua_to_field_value(value: LuaValue, schema: &FieldSchema) -> mlua::Result<Value> {
+    let mismatch = || mlua::Error::RuntimeError(format!("字段 {} 需要 {}", schema.name, schema.ty));
+    let converted = match (schema.ty.as_str(), value) {
+        ("f32" | "f64", LuaValue::Integer(value)) => Value::F64(value as f64),
+        ("entity", LuaValue::Integer(value)) => Value::Entity(value as u64),
+        ("quat", value) => match lua_to_value(&value)? {
+            Value::Vec4(value) => Value::Quat(value),
+            _ => return Err(mismatch()),
+        },
+        ("list", LuaValue::Table(table)) => {
+            let element = schema.element.as_deref().ok_or_else(mismatch)?;
+            let length = table.raw_len();
+            let mut values = Vec::new();
+            for index in 1..=length {
+                values.push(lua_to_field_value(table.raw_get(index)?, element)?);
+            }
+            for pair in table.pairs::<LuaValue, LuaValue>() {
+                if !matches!(pair?.0, LuaValue::Integer(index) if (1..=length).contains(&(index as usize)))
+                {
+                    return Err(mismatch());
+                }
+            }
+            Value::List(values)
+        }
+        ("struct", LuaValue::Table(table)) => {
+            let mut fields = std::collections::BTreeMap::new();
+            for pair in table.pairs::<String, LuaValue>() {
+                let (name, value) = pair?;
+                let field = schema
+                    .fields
+                    .iter()
+                    .find(|field| field.name == name)
+                    .ok_or_else(mismatch)?;
+                fields.insert(name, lua_to_field_value(value, field)?);
+            }
+            if fields.len() != schema.fields.len() {
+                return Err(mismatch());
+            }
+            Value::Struct(fields)
+        }
+        ("map", LuaValue::Table(table)) => {
+            let element = schema.element.as_deref().ok_or_else(mismatch)?;
+            let mut fields = std::collections::BTreeMap::new();
+            for pair in table.pairs::<String, LuaValue>() {
+                let (key, value) = pair?;
+                fields.insert(key, lua_to_field_value(value, element)?);
+            }
+            Value::Map(fields)
+        }
+        ("enum", LuaValue::Table(table)) => {
+            let variant = table.raw_get::<String>("variant")?;
+            let branch = schema.variant(&variant).ok_or_else(mismatch)?;
+            let payload = lua_to_field_value(table.raw_get("payload")?, branch)?;
+            Value::Enum {
+                variant,
+                payload: Box::new(payload),
+            }
+        }
+        (_, value) => lua_to_value(&value)?,
+    };
+    if !schema.fits(&converted) {
+        return Err(mismatch());
+    }
+    Ok(converted)
 }
 
 #[cfg(test)]

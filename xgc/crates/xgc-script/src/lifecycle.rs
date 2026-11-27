@@ -4,6 +4,28 @@ use mlua::{IntoLuaMulti, Table, Value as LuaValue};
 
 use super::LuaHost;
 
+pub(super) fn has_mounted_hook(environment: &Table) -> mlua::Result<bool> {
+    for name in [
+        "start",
+        "on_start",
+        "update",
+        "on_update",
+        "fixed_update",
+        "on_destroy",
+        "on_collision_enter",
+        "on_collision_exit",
+        "on_anim_event",
+    ] {
+        if matches!(
+            environment.raw_get::<LuaValue>(name)?,
+            LuaValue::Function(_)
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl LuaHost {
     fn call_legacy<A: IntoLuaMulti>(
         &self,

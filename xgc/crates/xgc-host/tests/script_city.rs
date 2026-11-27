@@ -1,8 +1,5 @@
-//! S4 中档脚本场景基线。以 Release 串行运行，预算按设计文档 §13.2 报告。
-//!
-//! 当前运行时每个挂载各有 VM，每步各调一次 `update(ctx)`；该步的 `SetField`
-//! 统一交给一个 `World::plan` / `World::apply` 事务。设计 §8.2 的模块级
-//! `update(batch)` 和批量实体视图仍待实现。
+//! S4 中档脚本场景。逐实体钩子和模块回调共用场景、写入结果、哈希与采样窗口。
+//! 以 Release 串行运行，预算按设计文档 §13.2 报告。
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -34,6 +31,22 @@ function update(ctx)
     state_set(ctx, "updates", updates)
     set_pos(ctx, id, updates, id % 17 + updates * 2)
 end
+"#;
+const BATCH_SOURCE: &str = r#"
+local M = {}
+local updates = 0
+local field = "core.transform.position"
+
+function M.update(batch)
+    updates = updates + 1
+    local offset = updates * 2
+    for i = 1, batch:len() do
+        local id = i - 1
+        batch:entity(i):set(field, {x = id, y = updates, z = id % 17 + offset})
+    end
+end
+
+return M
 "#;
 
 thread_local! {
@@ -82,7 +95,7 @@ struct ScriptCity {
 }
 
 impl ScriptCity {
-    fn new() -> Self {
+    fn new(source: &str) -> Self {
         let mut world = World::new();
         for _ in 0..ENTITIES {
             world.spawn((
@@ -103,7 +116,7 @@ impl ScriptCity {
             world_data: world.world_data(),
             initial_hash: world.state_hash(),
         };
-        std::fs::write(city.root.join(SCRIPT_PATH), SCRIPT_SOURCE).unwrap();
+        std::fs::write(city.root.join(SCRIPT_PATH), source).unwrap();
         city
     }
 
@@ -164,7 +177,17 @@ fn report_latency(label: &str, samples: &mut [Duration], budget_ms: f64) {
 #[test]
 #[ignore = "S4 真机基线，使用 Release 和单测试线程运行"]
 fn script_city_10k() {
-    let city = ScriptCity::new();
+    measure_script_city(SCRIPT_SOURCE);
+}
+
+#[test]
+#[ignore = "S4 真机批模块计量，使用 Release 和单测试线程运行"]
+fn script_city_batch_10k() {
+    measure_script_city(BATCH_SOURCE);
+}
+
+fn measure_script_city(source: &str) {
+    let city = ScriptCity::new(source);
     println!(
         "S4 entities={ENTITIES} warmup={WARMUP} debug_assertions={} initial_hash={:016x}",
         cfg!(debug_assertions),

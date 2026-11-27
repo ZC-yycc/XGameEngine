@@ -15,6 +15,7 @@ use lua_value::{lua_to_value, value_to_lua};
 
 mod api;
 mod audio_api;
+mod batch;
 mod budget;
 mod character_api;
 mod compile;

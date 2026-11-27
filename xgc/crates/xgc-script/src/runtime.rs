@@ -1,12 +1,11 @@
-//! 按 `script.lua.paths` 顺序驱动每个实体的 Lua 挂载，帧末统一结算命令。
+//! 按固定顺序派发 Lua 挂载与模块批回调，帧末统一结算命令。
+
+mod sources;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fs::{self, Metadata};
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::SystemTime;
 
 use xgc_asset::{AssetCatalog, AssetPaths, SearchPaths};
 use xgc_base::{EntityId, EntityKey};
@@ -15,32 +14,11 @@ use xgc_world::{AudioCommand, AudioMixer, Command, ListenerPose, Script, World};
 use crate::legacy::Commands;
 use crate::view::ScriptView;
 use crate::LuaHost;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct SourceStamp {
-    modified: Option<SystemTime>,
-    len: u64,
-}
-
-impl From<Metadata> for SourceStamp {
-    fn from(metadata: Metadata) -> Self {
-        Self {
-            modified: metadata.modified().ok(),
-            len: metadata.len(),
-        }
-    }
-}
-
-struct MountedVm {
-    host: LuaHost,
-    source: PathBuf,
-    active: Option<SourceStamp>,
-    observed: Option<SourceStamp>,
-}
+use sources::{BatchSources, MountVm};
 
 struct Mount {
     path: String,
-    vm: Option<MountedVm>,
+    vm: Option<MountVm>,
 }
 
 impl Mount {
@@ -50,7 +28,7 @@ impl Mount {
         hook: impl FnOnce(&LuaHost) -> Result<bool, String>,
         frame_error: &mut Option<String>,
     ) {
-        if let Some(vm) = &self.vm {
+        if let Some(MountVm::Entity(vm)) = &self.vm {
             if let Err(err) = hook(&vm.host) {
                 note_error(frame_error, mount_error(&self.path, entity, err));
             }
@@ -94,20 +72,23 @@ impl EntityScripts {
         }
     }
 
-    fn load_missing(
+    fn prepare_mounts(
         &mut self,
         assets: &AssetPaths,
         view: &Rc<RefCell<ScriptView>>,
+        batches: &mut BatchSources,
         entity: EntityId,
         error: &mut Option<String>,
     ) {
         for mount in &mut self.mounts {
-            if mount.vm.is_some() {
-                continue;
+            if mount.vm.is_none() {
+                match batches.load(assets, view, entity, &mount.path, &self.commands) {
+                    Ok(vm) => mount.vm = Some(vm),
+                    Err(err) => note_error(error, mount_error(&mount.path, entity, err)),
+                }
             }
-            match load_mount(assets, view, entity, &mount.path, &self.commands) {
-                Ok(vm) => mount.vm = Some(vm),
-                Err(err) => note_error(error, mount_error(&mount.path, entity, err)),
+            if let Some(MountVm::Batch(path)) = &mount.vm {
+                batches.add_member(path, entity);
             }
         }
     }
@@ -131,6 +112,7 @@ impl EntityScripts {
 pub struct ScriptRuntime {
     assets: AssetPaths,
     entries: BTreeMap<EntityId, EntityScripts>,
+    batches: BatchSources,
     view: Rc<RefCell<ScriptView>>,
     entity_keys: Vec<(EntityId, EntityKey)>,
     script_keys: Vec<(EntityId, EntityKey)>,
@@ -152,6 +134,7 @@ impl ScriptRuntime {
         Self {
             assets,
             entries: BTreeMap::new(),
+            batches: BatchSources::default(),
             view: Rc::new(RefCell::new(ScriptView::default())),
             entity_keys: Vec::new(),
             script_keys: Vec::new(),
@@ -180,6 +163,7 @@ impl ScriptRuntime {
 
         let mut pending = Vec::new();
         let error = &mut self.frame_error;
+        self.batches.begin_frame();
         self.entries.retain(|&entity, scripts| {
             if self
                 .script_keys
@@ -212,7 +196,7 @@ impl ScriptRuntime {
             let script = world.get::<Script>(key).expect("脚本组件在派发期间只读");
             let scripts = self.entries.entry(entity).or_default();
             scripts.reconcile(entity, script, error);
-            scripts.load_missing(&self.assets, &self.view, entity, error);
+            scripts.prepare_mounts(&self.assets, &self.view, &mut self.batches, entity, error);
             // 保留 XGC 按实体派发的阶段；同一实体在每个阶段按挂载顺序调用。
             scripts.dispatch(entity, LuaHost::start_legacy, error);
             scripts.dispatch(entity, |host| host.update_legacy(dt), error);
@@ -240,6 +224,8 @@ impl ScriptRuntime {
                 scripts.drain_into(&mut pending);
             }
         }
+        // 批回调读本步物理完成后的世界，成功写入排在同一步的挂载钩子之后。
+        self.batches.run(world, &mut pending, error);
         self.discard_action_edges();
         let mut view = self.view.borrow_mut();
         let body_velocities = view.body_velocities.drain(..);
@@ -308,19 +294,15 @@ impl ScriptRuntime {
 
     /// 仅由编辑器定时调用。失败后记住已看到的版本，下次保存时连同积压的修改一起重试。
     pub fn poll_reload(&mut self) -> Result<usize, String> {
-        let mut changed = false;
-        for vm in self
+        let mut changed = self.batches.observe();
+        for mount in self
             .entries
             .values_mut()
             .flat_map(|scripts| &mut scripts.mounts)
-            .filter_map(|mount| mount.vm.as_mut())
         {
-            let current = fs::metadata(&vm.source)
-                .ok()
-                .filter(Metadata::is_file)
-                .map(SourceStamp::from);
-            changed |= vm.observed != current;
-            vm.observed = current;
+            if let Some(MountVm::Entity(vm)) = &mut mount.vm {
+                changed |= vm.observe();
+            }
         }
         if changed {
             self.reload_modules(true)
@@ -333,27 +315,24 @@ impl ScriptRuntime {
         let mut modules = Vec::new();
         for (&entity, scripts) in &mut self.entries {
             for Mount { path, vm } in &mut scripts.mounts {
-                let Some(vm) = vm else {
+                let Some(MountVm::Entity(vm)) = vm else {
                     continue;
                 };
-                if changed_only && vm.active == vm.observed {
-                    continue;
+                if let Some(candidate) = vm
+                    .prepare_reload(path, changed_only, &self.view, &scripts.commands, None)
+                    .map_err(|err| mount_error(path, entity, err))?
+                {
+                    modules.push((vm, candidate));
                 }
-                let (source, stamp) =
-                    read_source(&vm.source).map_err(|err| mount_error(path, entity, err))?;
-                // 初始化用来构造模块，不能在步与步之间写实体或播放音频。
-                let module = initialize(&self.view, &scripts.commands, false, || {
-                    vm.host.prepare_module(path, &source)
-                })
-                .map_err(|err| mount_error(path, entity, err))?;
-                modules.push((vm, module, stamp));
             }
         }
-        let count = modules.len();
-        for (vm, module, stamp) in modules {
-            vm.host.commit_module(module);
-            vm.active = stamp;
-            vm.observed = stamp;
+        let batches = self.batches.prepare_reloads(changed_only, &self.view)?;
+        let mut count = modules.len();
+        for (vm, candidate) in modules {
+            vm.commit_reload(candidate);
+        }
+        for (batch, candidate) in batches {
+            count += batch.commit_reload(candidate);
         }
         Ok(count)
     }
@@ -426,52 +405,8 @@ fn mounted_paths(script: &Script) -> impl Iterator<Item = &str> + Clone {
         .filter(|path| !path.is_empty())
 }
 
-fn load_mount(
-    assets: &AssetPaths,
-    view: &Rc<RefCell<ScriptView>>,
-    entity: EntityId,
-    path: &str,
-    commands: &Commands,
-) -> Result<MountedVm, String> {
-    let resolved = assets.resolve(path).map_err(|err| err.to_string())?;
-    let (source, stamp) = read_source(&resolved)?;
-    let host = LuaHost::with_commands_and_view(Rc::clone(commands), Rc::clone(view), entity.raw())?;
-    initialize(view, commands, true, || host.load_script(path, &source))?;
-    Ok(MountedVm {
-        host,
-        source: resolved,
-        active: stamp,
-        observed: stamp,
-    })
-}
-
-fn read_source(path: &Path) -> Result<(String, Option<SourceStamp>), String> {
-    let error = |err| format!("读取 {} 失败：{err}", path.display());
-    let mut file = fs::File::open(path).map_err(error)?;
-    // 先取已打开文件的版本。外部原子替换后，旧内容不能被标记成新路径上的版本。
-    let stamp = file.metadata().ok().map(SourceStamp::from);
-    let mut source = String::new();
-    file.read_to_string(&mut source).map_err(error)?;
-    Ok((source, stamp))
-}
-
 fn mount_error(path: &str, entity: EntityId, err: String) -> String {
     format!("脚本 {path} 实体 {entity}：{err}")
-}
-
-fn initialize<T>(
-    view: &Rc<RefCell<ScriptView>>,
-    commands: &Commands,
-    keep_effects: bool,
-    load: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    // UI setter 可能改已有的待结算命令，失败后必须把先前写入还给原挂载。
-    let previous = commands.borrow().clone();
-    let result = ScriptView::initialize(view, keep_effects, load);
-    if !keep_effects || result.is_err() {
-        *commands.borrow_mut() = previous;
-    }
-    result
 }
 
 fn note_error(frame_error: &mut Option<String>, err: String) {

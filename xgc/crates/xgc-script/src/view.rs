@@ -154,7 +154,7 @@ impl ScriptView {
     /// 顶层初始化可能写帧内视图，只记录它碰过的行，避免每次初装都复制整张表。
     pub(crate) fn initialize<T>(
         view: &View,
-        keep_effects: bool,
+        keep_effects: impl FnOnce(&T) -> bool,
         load: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         {
@@ -170,7 +170,7 @@ impl ScriptView {
         let result = load();
         let mut view = view.borrow_mut();
         let checkpoint = view.mount_checkpoint.take().expect("初始化已建立检查点");
-        if !keep_effects || result.is_err() {
+        if !result.as_ref().is_ok_and(keep_effects) {
             for saved in checkpoint.entities {
                 if let Some(row) = view.entity_mut(saved.id) {
                     *row = saved;
