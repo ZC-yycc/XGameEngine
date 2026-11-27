@@ -82,11 +82,11 @@ pub(crate) fn register(
         .set(
             "entity_pos",
             lua.create_function(move |lua, (_ctx, id): (mlua::Value, u64)| {
-                let view = pos_view.borrow();
-                let entity = view
-                    .entity(id)
+                let position = pos_view
+                    .borrow_mut()
+                    .world_position(id)
                     .ok_or_else(|| mlua::Error::RuntimeError(format!("实体 {id} 不存在")))?;
-                vector_table(lua, entity.position.unwrap_or_default())
+                vector_table(lua, position)
             })
             .map_err(|err| err.to_string())?,
         )
@@ -98,11 +98,15 @@ pub(crate) fn register(
         .set(
             "set_pos",
             lua.create_function(move |_, (_ctx, x, y, z): (mlua::Value, f32, f32, f32)| {
-                let value = FieldValue::Vec3([x, y, z].map(f64::from));
-                set_pos_view
-                    .borrow_mut()
-                    .stage_field(self_id, Transform::ID, "position", &value);
-                push_set(&set_pos_commands, self_id, Transform::ID, "position", value);
+                let mut view = set_pos_view.borrow_mut();
+                let local = view.local_position(self_id, [x, y, z]);
+                push_transform(
+                    &set_pos_commands,
+                    &mut view,
+                    self_id,
+                    "position",
+                    FieldValue::Vec3(local.map(f64::from)),
+                );
                 Ok(())
             })
             .map_err(|err| err.to_string())?,
@@ -127,22 +131,18 @@ pub(crate) fn register(
         .map_err(|err| err.to_string())?;
 
     let set_rot_commands = Rc::clone(commands);
+    let set_rot_view = Rc::clone(view);
     globals
         .set(
             "set_rot",
             lua.create_function(move |_, (_ctx, x, y, z): (mlua::Value, f32, f32, f32)| {
                 let rotation = euler_to_quat([x, y, z]);
-                push_set(
+                push_transform(
                     &set_rot_commands,
+                    &mut set_rot_view.borrow_mut(),
                     self_id,
-                    Transform::ID,
                     "rotation",
-                    FieldValue::Quat([
-                        f64::from(rotation[0]),
-                        f64::from(rotation[1]),
-                        f64::from(rotation[2]),
-                        f64::from(rotation[3]),
-                    ]),
+                    FieldValue::Quat(rotation.map(f64::from)),
                 );
                 Ok(())
             })
@@ -156,17 +156,14 @@ pub(crate) fn register(
         .set(
             "look_at",
             lua.create_function(move |_, (_ctx, tx, ty, tz): (mlua::Value, f32, f32, f32)| {
-                let view = look_view.borrow();
-                let position = view
-                    .entity(self_id)
-                    .and_then(|entity| entity.position)
-                    .unwrap_or([0.0; 3]);
+                let mut view = look_view.borrow_mut();
+                let position = view.world_position(self_id).unwrap_or([0.0; 3]);
                 let direction = [tx - position[0], ty - position[1], tz - position[2]];
                 let length = (direction[0] * direction[0]
                     + direction[1] * direction[1]
                     + direction[2] * direction[2])
                     .sqrt();
-                if length <= 1e-6 {
+                if length <= 1e-6 || !length.is_finite() {
                     return Ok(());
                 }
                 let pitch = (direction[1] / length).asin().to_degrees();
@@ -174,18 +171,13 @@ pub(crate) fn register(
                 // `euler_to_quat` 的分量序是 [绕 X, 绕 Y, 绕 Z]，欧拉顺序 YXZ。
                 // 俯仰必须放第一个分量：放第三个会变成绕自身视轴的**滚转**
                 // （相机会「歪头」而不是低头，朝向也不指向目标）。
-                let rotation = euler_to_quat([pitch, yaw, 0.0]);
-                push_set(
+                let rotation = view.local_rotation(self_id, euler_to_quat([pitch, yaw, 0.0]));
+                push_transform(
                     &look_commands,
+                    &mut view,
                     self_id,
-                    Transform::ID,
                     "rotation",
-                    FieldValue::Quat([
-                        f64::from(rotation[0]),
-                        f64::from(rotation[1]),
-                        f64::from(rotation[2]),
-                        f64::from(rotation[3]),
-                    ]),
+                    FieldValue::Quat(rotation.map(f64::from)),
                 );
                 Ok(())
             })
@@ -453,11 +445,10 @@ fn register_script_state(
         .set(
             "pos",
             lua.create_function(move |lua, _ctx: mlua::Value| {
-                let view = pos_view.borrow();
-                let position = view
-                    .entity(self_id)
-                    .and_then(|entity| entity.position)
-                    .unwrap_or([0.0, 0.0, 0.0]);
+                let position = pos_view
+                    .borrow_mut()
+                    .world_position(self_id)
+                    .unwrap_or_default();
                 vector_table(lua, position)
             })
             .map_err(|err| err.to_string())?,
@@ -550,6 +541,17 @@ fn edit_animation_layer(
         field: "layers".to_string(),
         value: updated,
     });
+}
+
+fn push_transform(
+    commands: &Commands,
+    view: &mut ScriptView,
+    id: u64,
+    field: &str,
+    value: FieldValue,
+) {
+    view.stage_field(id, Transform::ID, field, &value);
+    push_set(commands, id, Transform::ID, field, value);
 }
 
 pub(crate) fn push_set(

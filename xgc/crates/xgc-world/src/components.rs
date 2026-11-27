@@ -220,6 +220,12 @@ impl GlobalTransform {
         }
     }
 
+    /// 将世界朝向换到此父节点的旋转空间，与层级传播的四元数组合互逆。
+    pub fn to_local_rotation(&self, world: [f32; 4]) -> [f32; 4] {
+        let [x, y, z, w] = self.rotation;
+        normalize_quat(quat_mul([-x, -y, -z, w], world))
+    }
+
     /// 父全局变换 ∘ 本地变换。旋转按四元数复合，缩放逐轴相乘。
     pub fn compose(parent: &Self, local: &Transform) -> Self {
         let scaled = [

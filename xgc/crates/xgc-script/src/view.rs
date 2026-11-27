@@ -9,11 +9,14 @@ use std::collections::BTreeMap;
 use xgc_base::{EntityId, EntityKey};
 use xgc_world::{
     AnimationLayers, AnimationState, BodyKind, CharacterController, Component, ComponentId,
-    FieldPath, Name, PhysicsBody, Transform, UiElement, UiInteraction, Value, Velocity, World,
+    FieldPath, GlobalTransform, Name, Parent, PhysicsBody, Transform, UiElement, UiInteraction,
+    Value, Velocity, World,
 };
 
 use crate::audio_api::{AudioCheckpoint, ScriptAudio};
 use crate::legacy::View;
+
+mod pose;
 
 /// `ui.element`（comp `0x0601`）的只读快照：布局 setter 需要「当前尺寸 / 位置」
 /// 做增量修改，getter 需要文本 / 可见 / 可交互。
@@ -36,6 +39,8 @@ pub struct EntityView {
     pub name: String,
     pub position: Option<[f32; 3]>,
     pub rotation: [f32; 4],
+    pub scale: Option<[f32; 3]>,
+    pub parent: Option<EntityId>,
     pub velocity: [f32; 3],
     /// 是否有 `core.velocity`；角色脚本第一次移动时可能要先补这个组件。
     pub has_velocity: bool,
@@ -62,6 +67,8 @@ impl EntityView {
         let transform = world.get::<Transform>(key);
         self.position = transform.map(|transform| transform.position);
         self.rotation = transform.map_or_else(|| Transform::default().rotation, |t| t.rotation);
+        self.scale = transform.map(|transform| transform.scale);
+        self.parent = world.get::<Parent>(key).map(|parent| parent.entity);
 
         let velocity = world.get::<Velocity>(key);
         self.has_velocity = velocity.is_some();
@@ -147,6 +154,7 @@ pub struct ScriptView {
     /// 直接改运行时元素，天然可见）。命令在帧末才 apply，所以这里补一份快照，
     /// 结算后下一帧由 `refresh_view` 从世界重建、清空。
     pub pending_spawns: BTreeMap<u64, EntityView>,
+    parent_transforms: Vec<GlobalTransform>,
     mount_checkpoint: Option<MountCheckpoint>,
 }
 
@@ -239,10 +247,13 @@ impl ScriptView {
         value: &Value,
     ) {
         // 视图跟随调用顺序，实际校验与提交由世界事务负责。
-        if component == Transform::ID && field == "position" {
-            if let Some(position) = value.as_vec3() {
-                if let Some(staged) = self.entity_mut(id).and_then(|row| row.position.as_mut()) {
-                    *staged = position;
+        if component == Transform::ID {
+            if let Some(row) = self.entity_mut(id).filter(|row| row.position.is_some()) {
+                match field {
+                    "position" => row.position = value.as_vec3().or(row.position),
+                    "rotation" => row.rotation = value.as_quat().unwrap_or(row.rotation),
+                    "scale" => row.scale = value.as_vec3().or(row.scale),
+                    _ => {}
                 }
             }
             return;
